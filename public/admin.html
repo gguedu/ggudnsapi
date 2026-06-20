@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GGU DNS 管理后台</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; min-height: 100vh; color: #f8fafc; background: #020617; overflow-x: hidden; }
+    body::before { content: ""; position: fixed; inset: -20%; background: radial-gradient(circle at 20% 20%, rgba(37,99,235,.35), transparent 28%), radial-gradient(circle at 80% 10%, rgba(14,165,233,.22), transparent 28%), radial-gradient(circle at 50% 80%, rgba(34,197,94,.12), transparent 30%); filter: blur(12px); z-index: -1; }
+    .shell { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 40px 0; }
+    .hero, .panel { border: 1px solid rgba(255,255,255,.12); background: linear-gradient(135deg, rgba(15,23,42,.78), rgba(15,23,42,.48)); box-shadow: 0 24px 80px rgba(0,0,0,.35), inset 0 1px rgba(255,255,255,.12); backdrop-filter: blur(24px); border-radius: 28px; }
+    .hero { padding: 28px; display: grid; gap: 18px; }
+    h1 { margin: 0; font-size: clamp(28px, 5vw, 52px); letter-spacing: -.04em; }
+    p { color: #94a3b8; line-height: 1.7; }
+    .token { display: flex; gap: 12px; flex-wrap: wrap; }
+    input, select, textarea, button { border-radius: 14px; border: 1px solid rgba(255,255,255,.12); background: rgba(15,23,42,.72); color: #f8fafc; padding: 11px 13px; font: inherit; }
+    input, select, textarea { min-width: 0; }
+    button { cursor: pointer; background: linear-gradient(135deg, #2563eb, #0ea5e9); border: 0; font-weight: 700; transition: transform .2s ease, opacity .2s ease; }
+    button:hover { transform: translateY(-1px); }
+    button.secondary { background: rgba(255,255,255,.08); }
+    .grid { display: grid; grid-template-columns: 220px 1fr; gap: 18px; margin-top: 18px; }
+    nav.panel { padding: 12px; align-self: start; position: sticky; top: 18px; }
+    nav button { width: 100%; margin: 4px 0; text-align: left; background: transparent; border: 1px solid transparent; }
+    nav button.active { background: rgba(37,99,235,.22); border-color: rgba(96,165,250,.35); }
+    main.panel { padding: 22px; min-height: 520px; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+    table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 18px; }
+    th, td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,.08); text-align: left; vertical-align: top; }
+    th { color: #cbd5e1; font-size: 13px; }
+    td { color: #e2e8f0; font-size: 14px; }
+    .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin: 14px 0 22px; }
+    .status { min-height: 22px; color: #93c5fd; }
+    .danger { color: #fecaca; }
+    @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } nav.panel { position: static; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div>
+        <p style="margin:0 0 8px;letter-spacing:.28em;text-transform:uppercase">GGU DNS Control</p>
+        <h1>DNS 分发平台管理后台</h1>
+        <p>使用 GGU 通行证 token 调用管理 API。静态页面不包含任何密钥，所有权限由后端 <code>/api/admin/**</code> 校验。</p>
+      </div>
+      <div class="token">
+        <input id="token" style="flex:1 1 420px" placeholder="粘贴 localStorage mail_token / Authorization token" />
+        <button onclick="saveToken()">保存 Token</button>
+        <button class="secondary" onclick="loadAll()">刷新</button>
+      </div>
+      <div id="status" class="status"></div>
+    </section>
+
+    <div class="grid">
+      <nav class="panel" id="tabs"></nav>
+      <main class="panel">
+        <div id="view"></div>
+      </main>
+    </div>
+  </div>
+
+<script>
+const tabs = [
+  ['users', '用户管理'], ['accounts', 'CF 账户'], ['domains', '域名池'], ['blacklist', '黑名单'], ['settings', '解析类型/配置'], ['records', '解析总览']
+]
+let current = 'users'
+let cache = {}
+const $ = id => document.getElementById(id)
+const setStatus = (msg, danger=false) => { $('status').textContent = msg; $('status').className = danger ? 'status danger' : 'status' }
+
+function token() { return localStorage.getItem('mail_token') || $('token').value.trim() }
+function saveToken() { localStorage.setItem('mail_token', $('token').value.trim()); setStatus('Token 已保存'); loadAll() }
+async function api(path, options = {}) {
+  const res = await fetch(path, { ...options, headers: { 'content-type': 'application/json', Authorization: token(), ...(options.headers || {}) } })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok || body.success === false) throw new Error(body.message || `HTTP ${res.status}`)
+  return body.data
+}
+function renderTabs() {
+  $('tabs').innerHTML = tabs.map(([id, label]) => `<button class="${id===current?'active':''}" onclick="current='${id}';renderTabs();render()">${label}</button>`).join('')
+}
+function esc(v) { return String(v ?? '').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])) }
+function table(rows, cols) {
+  return `<table><thead><tr>${cols.map(c=>`<th>${c[1]}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${esc(typeof c[0]==='function'?c[0](r):r[c[0]])}</td>`).join('')}</tr>`).join('')}</tbody></table>`
+}
+async function loadAll() {
+  try {
+    setStatus('正在加载...')
+    const names = ['users','cf-accounts','domains','blacklist','settings','records']
+    const [users, accounts, domains, blacklist, settings, records] = await Promise.all(names.map(n => api(`/api/admin/${n}`)))
+    cache = { users, accounts, domains, blacklist, settings, records }
+    setStatus('已刷新')
+    render()
+  } catch (e) { setStatus(e.message, true) }
+}
+function render() {
+  if (current === 'users') $('view').innerHTML = `<h2>用户管理</h2><div class="toolbar"><input id="uid" placeholder="UID"><input id="delta" placeholder="积分增减，如 1 / -1"><input id="msg" placeholder="备注"><button onclick="adjust()">调整积分</button></div>${table(cache.users||[], [['uid','UID'],['email','邮箱'],['points','积分'],['recordCount','解析数'],['lastSeenAt','最近访问']])}`
+  if (current === 'accounts') $('view').innerHTML = `<h2>CF 账户</h2><div class="form"><input id="accName" placeholder="名称"><select id="accType"><option value="token">API Token</option><option value="key_email">Key + Email</option></select><input id="accEmail" placeholder="Email（Key 模式）"><input id="accSecret" placeholder="Token 或 API Key"><button onclick="addAccount()">新增账户</button></div>${table(cache.accounts||[], [['id','ID'],['name','名称'],['authType','鉴权'],['email','邮箱'],[r=>r.hasApiToken?'是':'否','Token'],[r=>r.hasApiKey?'是':'否','Key']])}`
+  if (current === 'domains') $('view').innerHTML = `<h2>域名池</h2><div class="form"><input id="root" placeholder="root，如 example.com"><input id="zoneId" placeholder="Zone ID"><input id="cfAccountId" placeholder="CF 账户 ID"><input id="pointCost" placeholder="点数成本，默认 1"><button onclick="addDomain()">新增域名</button></div>${table(cache.domains||[], [['root','域名'],['zoneId','Zone'],['cfAccountId','账户'],['enabled','启用'],['pointCost','点数']])}`
+  if (current === 'blacklist') $('view').innerHTML = `<h2>黑名单</h2><div class="form"><input id="pattern" placeholder="规则"><select id="target"><option value="domain">域名</option><option value="user">用户</option></select><select id="type"><option>exact</option><option>suffix</option><option>contains</option><option>wildcard</option></select><input id="reason" placeholder="原因"><button onclick="addBlacklist()">新增</button></div>${table(cache.blacklist||[], [['pattern','规则'],['target','目标'],['type','类型'],['reason','原因'],['createdAt','时间']])}`
+  if (current === 'settings') $('view').innerHTML = `<h2>解析类型 / 全局配置</h2><div class="form"><input id="allowedTypes" value="${esc((cache.settings?.allowedTypes||[]).join(','))}" placeholder="A,AAAA"><input id="initialPoints" value="${esc(cache.settings?.initialPoints)}" placeholder="初始积分"><input id="defaultTtl" value="${esc(cache.settings?.defaultTtl)}" placeholder="默认 TTL"><select id="protection"><option value="true">开启子域保护</option><option value="false">关闭子域保护</option></select><button onclick="saveSettings()">保存设置</button></div><pre>${esc(JSON.stringify(cache.settings, null, 2))}</pre>`
+  if (current === 'records') $('view').innerHTML = `<h2>解析总览</h2>${table(cache.records||[], [['fullDomain','域名'],['type','类型'],['content','内容'],['uid','UID'],['enabled','启用'],['status','状态'],['createIp','创建 IP'],['createdAt','时间']])}`
+}
+async function adjust(){ await api(`/api/admin/users/${encodeURIComponent($('uid').value)}/points`, {method:'PATCH', body:JSON.stringify({delta:Number($('delta').value), message:$('msg').value})}); loadAll() }
+async function addAccount(){ const authType=$('accType').value; await api('/api/admin/cf-accounts',{method:'POST',body:JSON.stringify({name:$('accName').value,authType,email:$('accEmail').value,[authType==='token'?'apiToken':'apiKey']:$('accSecret').value})}); loadAll() }
+async function addDomain(){ await api('/api/admin/domains',{method:'POST',body:JSON.stringify({root:$('root').value,zoneId:$('zoneId').value,cfAccountId:$('cfAccountId').value,pointCost:Number($('pointCost').value||1)})}); loadAll() }
+async function addBlacklist(){ await api('/api/admin/blacklist',{method:'POST',body:JSON.stringify({pattern:$('pattern').value,target:$('target').value,type:$('type').value,reason:$('reason').value})}); loadAll() }
+async function saveSettings(){ await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({allowedTypes:$('allowedTypes').value.split(',').map(s=>s.trim()).filter(Boolean),initialPoints:Number($('initialPoints').value),defaultTtl:Number($('defaultTtl').value),protectionEnabled:$('protection').value==='true'})}); loadAll() }
+$('token').value = localStorage.getItem('mail_token') || ''
+renderTabs(); render(); if ($('token').value) loadAll()
+</script>
+</body>
+</html>

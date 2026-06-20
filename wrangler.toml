@@ -1,0 +1,23 @@
+name = "ggudnsapi"
+main = "src/index.ts"
+compatibility_date = "2026-06-17"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[[kv_namespaces]]
+binding = "DNS_KV"
+id = "replace-with-production-kv-id"
+preview_id = "replace-with-preview-kv-id"
+
+[vars]
+MAIL_API_BASE_URL = "https://mail.ggu.edu.kg/api"
+ALLOWED_ORIGIN = "https://ggu.edu.kg"
+DNS_ADMIN_EMAILS = "admin@ggu.edu.kg"
+DEFAULT_INITIAL_POINTS = "1"
+DELETE_REFUND_ENABLED = "false"
+
+# Recommended secret:
+# CREDENTIALS_ENCRYPTION_KEY = "32-byte-base64-or-long-random-secret"

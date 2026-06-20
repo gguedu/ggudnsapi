@@ -1,0 +1,249 @@
+import type { CfAccount, DnsRecord, DnsRecordInput, DnsRecordType, DnsUser, Env, ManagedDomain, Settings } from './types'
+import { createDnsRecord, patchDnsRecord, safeDeleteDnsRecord } from './cloudflare'
+import { ResponseError, getClientIp, nowIso, randomId } from './http'
+import {
+  deleteOwner,
+  deleteRecordIndexes,
+  getCfAccount,
+  getOwner,
+  getRecord,
+  listDomainRecords,
+  listDomains,
+  listRecords,
+  listUserRecords,
+  putOwner,
+  putRecord
+} from './kv'
+import { refundPoints, spendPoints } from './points'
+import {
+  assertBlacklistAllowed,
+  assertFullDomainTypeAvailable,
+  assertSubdomainAllowed,
+  findManagedDomain,
+  getSecondLevel,
+  validateRecordInput
+} from './domain'
+
+type SubdomainCheck = Awaited<ReturnType<typeof assertSubdomainAllowed>>
+
+export const publicDomain = (domain: ManagedDomain, settings: Settings) => ({
+  root: domain.root,
+  enabled: domain.enabled,
+  allowedTypes: domain.allowedTypes?.length ? domain.allowedTypes : settings.allowedTypes,
+  defaultTtl: domain.defaultTtl || settings.defaultTtl,
+  proxiedDefault: domain.proxiedDefault || false,
+  pointCost: domain.pointCost || 1
+})
+
+export const recordsMeta = async (env: Env, settings: Settings) => {
+  const domains = await listDomains(env)
+  return {
+    allowedTypes: settings.allowedTypes,
+    defaultTtl: settings.defaultTtl,
+    protectionEnabled: settings.protectionEnabled,
+    domains: domains.filter(item => item.enabled).map(item => publicDomain(item, settings))
+  }
+}
+
+export const serializeRecord = (record: DnsRecord) => record
+
+const ensureAccount = async (env: Env, domain: ManagedDomain) => {
+  const account = await getCfAccount(env, domain.cfAccountId)
+  if (!account) throw new ResponseError('Cloudflare 账户不存在', 500)
+  return account
+}
+
+const buildRecord = (
+  user: DnsUser,
+  domain: ManagedDomain,
+  input: DnsRecordInput,
+  cfRecordId: string,
+  secondLevel: string,
+  pointCost: number,
+  request: Request
+): DnsRecord => {
+  const now = nowIso()
+  return {
+    id: randomId(),
+    uid: user.uid,
+    root: domain.root,
+    zoneId: domain.zoneId,
+    cfAccountId: domain.cfAccountId,
+    cfRecordId,
+    secondLevel,
+    fullDomain: input.fullDomain,
+    type: input.type,
+    content: input.content,
+    ttl: input.ttl || domain.defaultTtl || 600,
+    proxied: input.proxied || false,
+    priority: input.priority,
+    comment: input.comment,
+    pointCost,
+    enabled: true,
+    status: 'active',
+    createIp: getClientIp(request),
+    createdAt: now,
+    updatedAt: now,
+    lastRefreshAt: now
+  }
+}
+
+const ensureOwner = async (env: Env, user: DnsUser, record: DnsRecord, subdomain: SubdomainCheck) => {
+  if (subdomain.ownerExists) return
+  await putOwner(env, {
+    root: record.root,
+    secondLevel: record.secondLevel,
+    uid: user.uid,
+    firstRecordId: record.id,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt
+  })
+}
+
+const cleanupOwnerIfUnused = async (env: Env, record: DnsRecord) => {
+  const remaining = await listUserRecords(env, record.uid)
+  const stillUsed = remaining.some(
+    item => item.id !== record.id && item.root === record.root && item.secondLevel === record.secondLevel
+  )
+  if (!stillUsed) await deleteOwner(env, record.root, record.secondLevel)
+}
+
+export const createUserRecord = async (env: Env, request: Request, user: DnsUser, settings: Settings, body: Record<string, unknown>) => {
+  const domains = await listDomains(env)
+  const domain = findManagedDomain(String(body.fullDomain || ''), domains)
+  const input = validateRecordInput(body, settings, domain)
+  const account = await ensureAccount(env, domain)
+  const secondLevel = getSecondLevel(input.fullDomain, domain.root)
+  await assertBlacklistAllowed(env, user, input.fullDomain, secondLevel, domain.root)
+  const subdomain = await assertSubdomainAllowed(env, account, domain.zoneId, user.uid, input.fullDomain, domain.root, settings)
+  await assertFullDomainTypeAvailable(env, account, domain.zoneId, input.fullDomain, input.type)
+
+  const pointCost = domain.pointCost || 1
+  if (user.points < pointCost) throw new ResponseError('积分不足', 400)
+
+  const cfRecord = await createDnsRecord(env, account, domain.zoneId, input)
+  const record = buildRecord(user, domain, input, cfRecord.id, subdomain.secondLevel, pointCost, request)
+
+  try {
+    await putRecord(env, record)
+    await ensureOwner(env, user, record, subdomain)
+    const { user: nextUser } = await spendPoints(env, user, pointCost, record.id)
+    return { record: serializeRecord(record), user: nextUser }
+  } catch (error) {
+    await safeDeleteDnsRecord(env, account, domain.zoneId, cfRecord.id).catch(() => false)
+    await deleteRecordIndexes(env, record).catch(() => undefined)
+    if (!subdomain.ownerExists) await deleteOwner(env, record.root, record.secondLevel).catch(() => undefined)
+    throw error
+  }
+}
+
+const assertRecordOwner = (record: DnsRecord | null, user: DnsUser) => {
+  if (!record) throw new ResponseError('解析记录不存在', 404)
+  if (record.uid !== user.uid) throw new ResponseError('无权操作该解析记录', 403)
+  return record
+}
+
+const mutableInputFromRecord = (record: DnsRecord, body: Record<string, unknown>) => ({
+  fullDomain: record.fullDomain,
+  type: record.type,
+  content: String(body.content ?? record.content),
+  ttl: body.ttl === undefined ? record.ttl : Number(body.ttl),
+  proxied: body.proxied === undefined ? record.proxied : Boolean(body.proxied),
+  priority: body.priority === undefined ? record.priority : Number(body.priority),
+  comment: typeof body.comment === 'string' ? body.comment : record.comment
+})
+
+export const updateUserRecord = async (env: Env, user: DnsUser, settings: Settings, id: string, body: Record<string, unknown>) => {
+  const record = assertRecordOwner(await getRecord(env, id), user)
+  const domain = (await listDomains(env)).find(item => item.root === record.root)
+  if (!domain) throw new ResponseError('域名池配置不存在', 500)
+  const input = validateRecordInput(mutableInputFromRecord(record, body), settings, domain)
+  const account = await ensureAccount(env, domain)
+
+  await assertBlacklistAllowed(env, user, input.fullDomain, record.secondLevel, record.root)
+  await assertFullDomainTypeAvailable(env, account, record.zoneId, input.fullDomain, input.type, record.cfRecordId)
+
+  let cfRecordId = record.cfRecordId
+  if (record.enabled) {
+    const cfRecord = await patchDnsRecord(env, account, record.zoneId, record.cfRecordId, input)
+    cfRecordId = cfRecord.id
+  }
+
+  const next: DnsRecord = {
+    ...record,
+    cfRecordId,
+    content: input.content,
+    ttl: input.ttl || record.ttl,
+    proxied: input.proxied || false,
+    priority: input.priority,
+    comment: input.comment,
+    status: record.enabled ? 'active' : record.status,
+    updatedAt: nowIso(),
+    lastRefreshAt: nowIso()
+  }
+  await putRecord(env, next)
+  return serializeRecord(next)
+}
+
+export const deleteUserRecord = async (env: Env, user: DnsUser, settings: Settings, id: string) => {
+  const record = assertRecordOwner(await getRecord(env, id), user)
+  const domain = (await listDomains(env)).find(item => item.root === record.root)
+  const account = domain ? await ensureAccount(env, domain) : undefined
+
+  if (account && record.cfRecordId) {
+    await safeDeleteDnsRecord(env, account, record.zoneId, record.cfRecordId)
+  }
+  await deleteRecordIndexes(env, record)
+  await cleanupOwnerIfUnused(env, record)
+
+  let nextUser = user
+  if (settings.deleteRefundEnabled && record.pointCost > 0) {
+    nextUser = (await refundPoints(env, user, record.pointCost, record.id)).user
+  }
+  return { record, user: nextUser }
+}
+
+export const toggleUserRecord = async (env: Env, user: DnsUser, settings: Settings, id: string) => {
+  const record = assertRecordOwner(await getRecord(env, id), user)
+  const domain = (await listDomains(env)).find(item => item.root === record.root)
+  if (!domain) throw new ResponseError('域名池配置不存在', 500)
+  const account = await ensureAccount(env, domain)
+
+  if (record.enabled) {
+    await safeDeleteDnsRecord(env, account, record.zoneId, record.cfRecordId)
+    const next: DnsRecord = { ...record, enabled: false, status: 'missing', updatedAt: nowIso(), lastRefreshAt: nowIso() }
+    await putRecord(env, next)
+    return serializeRecord(next)
+  }
+
+  const input: DnsRecordInput = {
+    fullDomain: record.fullDomain,
+    type: record.type,
+    content: record.content,
+    ttl: record.ttl,
+    proxied: record.proxied,
+    priority: record.priority,
+    comment: record.comment
+  }
+  validateRecordInput({ ...input }, settings, domain)
+  await assertBlacklistAllowed(env, user, record.fullDomain, record.secondLevel, record.root)
+  await assertSubdomainAllowed(env, account, record.zoneId, user.uid, record.fullDomain, record.root, settings)
+  await assertFullDomainTypeAvailable(env, account, record.zoneId, record.fullDomain, record.type)
+  const cfRecord = await createDnsRecord(env, account, record.zoneId, input)
+  const next: DnsRecord = {
+    ...record,
+    cfRecordId: cfRecord.id,
+    enabled: true,
+    status: 'active',
+    updatedAt: nowIso(),
+    lastRefreshAt: nowIso()
+  }
+  await putRecord(env, next)
+  return serializeRecord(next)
+}
+
+export const listUserRecordSummaries = async (env: Env, user: DnsUser) =>
+  (await listUserRecords(env, user.uid)).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(serializeRecord)
+
+export const listAllRecordSummaries = async (env: Env) =>
+  (await listRecords(env)).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(serializeRecord)
