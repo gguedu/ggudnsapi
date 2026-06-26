@@ -28,6 +28,8 @@ export interface DnsUser {
   name?: string
   points: number
   initialGrantDone: true
+  banned?: boolean
+  bannedReason?: string
   createdAt: string
   lastSeenAt: string
 }
@@ -46,6 +48,8 @@ export type CfAuthType = 'token' | 'key_email'
 export interface CfAccount {
   id: string
   name: string
+  remark?: string
+  accountId?: string
   authType: CfAuthType
   email?: string
   apiTokenEncrypted?: string
@@ -67,7 +71,26 @@ export interface ManagedDomain {
   updatedAt: string
 }
 
-export type DnsRecordType = 'A' | 'AAAA' | 'CNAME' | 'TXT' | 'MX'
+export type DnsRecordType =
+  | 'A'
+  | 'AAAA'
+  | 'CNAME'
+  | 'HTTPS'
+  | 'TXT'
+  | 'SRV'
+  | 'LOC'
+  | 'MX'
+  | 'NS'
+  | 'CERT'
+  | 'DNSKEY'
+  | 'DS'
+  | 'NAPTR'
+  | 'SMIMEA'
+  | 'SSHFP'
+  | 'SVCB'
+  | 'TLSA'
+  | 'URI'
+  | 'CAA'
 
 export interface DnsRecordInput {
   fullDomain: string

@@ -57,7 +57,7 @@ export const getSettings = async (env: Env): Promise<Settings> => {
     protectionEnabled: true,
     initialPoints: Number(env.DEFAULT_INITIAL_POINTS || 1),
     deleteRefundEnabled: env.DELETE_REFUND_ENABLED === 'true',
-    allowedTypes: ['A', 'AAAA', 'CNAME', 'TXT', 'MX'],
+    allowedTypes: [],
     defaultTtl: 600,
     updatedAt: nowIso()
   }
@@ -90,9 +90,17 @@ export const deleteDomain = async (env: Env, root: string) => {
 }
 
 export const getUser = (env: Env, uid: string) => kvGet<DnsUser>(env, keys.user(uid))
+export const getUserByEmail = async (env: Env, email: string) => {
+  const marker = await kvGet<{ uid: string }>(env, keys.userEmail(email.toLowerCase()))
+  return marker ? getUser(env, marker.uid) : null
+}
 export const putUser = async (env: Env, user: DnsUser) => {
   await kvPut(env, keys.user(user.uid), user)
-  await kvPut(env, keys.userEmail(user.email), { uid: user.uid })
+  await kvPut(env, keys.userEmail(user.email.toLowerCase()), { uid: user.uid })
+}
+export const deleteUser = async (env: Env, user: DnsUser) => {
+  await kvDelete(env, keys.user(user.uid))
+  await kvDelete(env, keys.userEmail(user.email.toLowerCase()))
 }
 export const listUsers = (env: Env) => listValues<DnsUser>(env, 'user:')
 

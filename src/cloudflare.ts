@@ -1,6 +1,11 @@
 import type { CfAccount, CfDnsRecord, CfZone, DnsRecordInput, Env } from './types'
 import { ResponseError } from './http'
 
+interface CfAccountInfo {
+  id: string
+  name: string
+}
+
 interface CfEnvelope<T> {
   success: boolean
   result: T
@@ -62,6 +67,9 @@ export const cfRequest = async <T>(env: Env, account: CfAccount, path: string, i
   }
   return payload.result
 }
+
+export const listCloudflareAccounts = (env: Env, account: CfAccount) =>
+  cfRequest<CfAccountInfo[]>(env, account, '/accounts?per_page=100')
 
 export const listZones = (env: Env, account: CfAccount) =>
   cfRequest<CfZone[]>(env, account, '/zones?per_page=100')

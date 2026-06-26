@@ -73,6 +73,7 @@ export const ensureDnsUser = async (env: Env, mailUser: MailUserInfo): Promise<D
       lastSeenAt: now
     }
     await putUser(env, next)
+    if (next.banned) throw new ResponseError(next.bannedReason || '用户已被封禁', 403)
     return next
   }
 

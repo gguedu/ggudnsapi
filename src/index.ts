@@ -1,15 +1,17 @@
-import type { BlacklistRule, CfAccount, CfAuthType, DnsRecordType, Env, ManagedDomain, Settings } from './types'
-import { requireAdmin, requireUser } from './auth'
-import { encryptSecret, listZones } from './cloudflare'
+import type { BlacklistRule, CfAccount, CfAuthType, DnsRecordType, DnsUser, Env, ManagedDomain, Settings } from './types'
+import { getCurrentMailUser, requireAdmin, requireUser } from './auth'
+import { encryptSecret, listCloudflareAccounts, listZones } from './cloudflare'
 import { findManagedDomain, normalizeHostname } from './domain'
 import { ResponseError, corsHeaders, fail, nowIso, ok, randomId, readJson } from './http'
 import {
   deleteBlacklist,
   deleteCfAccount,
   deleteDomain,
+  deleteUser,
   getCfAccount,
   getSettings,
   getUser,
+  getUserByEmail,
   listBlacklist,
   listCfAccounts,
   listDomains,
@@ -33,7 +35,27 @@ import {
   updateUserRecord
 } from './records'
 
-const SUPPORTED_TYPES: DnsRecordType[] = ['A', 'AAAA', 'CNAME', 'TXT', 'MX']
+const SUPPORTED_TYPES: DnsRecordType[] = [
+  'A',
+  'AAAA',
+  'CNAME',
+  'HTTPS',
+  'TXT',
+  'SRV',
+  'LOC',
+  'MX',
+  'NS',
+  'CERT',
+  'DNSKEY',
+  'DS',
+  'NAPTR',
+  'SMIMEA',
+  'SSHFP',
+  'SVCB',
+  'TLSA',
+  'URI',
+  'CAA'
+]
 
 const withCors = (request: Request, env: Env, response: Response) => {
   const headers = new Headers(response.headers)
@@ -55,6 +77,8 @@ const requireBody = <T = Record<string, unknown>>(request: Request) => readJson<
 const redactAccount = (account: CfAccount) => ({
   id: account.id,
   name: account.name,
+  remark: account.remark,
+  accountId: account.accountId,
   authType: account.authType,
   email: account.email,
   hasApiToken: Boolean(account.apiTokenEncrypted),
@@ -67,7 +91,7 @@ const parseAllowedTypes = (value: unknown, fallback: DnsRecordType[]) => {
   if (value === undefined) return fallback
   if (!Array.isArray(value)) throw new ResponseError('解析类型配置不正确', 400)
   const next = value.map(item => String(item).toUpperCase() as DnsRecordType)
-  if (next.length === 0 || next.some(item => !SUPPORTED_TYPES.includes(item))) {
+  if (next.some(item => !SUPPORTED_TYPES.includes(item))) {
     throw new ResponseError('解析类型配置不正确', 400)
   }
   return next
@@ -96,7 +120,9 @@ const accountFromBody = async (env: Env, body: Record<string, unknown>, existing
   if (authType !== 'token' && authType !== 'key_email') throw new ResponseError('Cloudflare 鉴权类型不正确', 400)
   const account: CfAccount = {
     id: existing?.id || randomId(),
-    name: String(body.name || existing?.name || '').trim(),
+    name: existing?.name || 'Cloudflare Account',
+    remark: body.remark === undefined ? existing?.remark : String(body.remark || '').trim(),
+    accountId: existing?.accountId,
     authType,
     email: body.email === undefined ? existing?.email : String(body.email || '').trim(),
     apiTokenEncrypted: existing?.apiTokenEncrypted,
@@ -104,26 +130,50 @@ const accountFromBody = async (env: Env, body: Record<string, unknown>, existing
     createdAt: existing?.createdAt || now,
     updatedAt: now
   }
-  if (!account.name) throw new ResponseError('账户名称不能为空', 400)
   if (body.apiToken) account.apiTokenEncrypted = await encryptSecret(env, String(body.apiToken))
   if (body.apiKey) account.apiKeyEncrypted = await encryptSecret(env, String(body.apiKey))
   if (authType === 'token' && !account.apiTokenEncrypted) throw new ResponseError('API Token 不能为空', 400)
   if (authType === 'key_email' && (!account.email || !account.apiKeyEncrypted)) {
     throw new ResponseError('邮箱和 API Key 不能为空', 400)
   }
+
+  try {
+    const accounts = await listCloudflareAccounts(env, account)
+    const first = accounts[0]
+    if (first) {
+      account.name = first.name || account.name
+      account.accountId = first.id || account.accountId
+    }
+  } catch (error) {
+    if (!existing) throw error
+  }
+
   return account
 }
 
-const domainFromBody = (body: Record<string, unknown>, settings: Settings, existing?: ManagedDomain): ManagedDomain => {
+const resolveDomainZone = async (env: Env, account: CfAccount, root: string) => {
+  const zones = await listZones(env, account)
+  const zone = zones.find(item => item.name.toLowerCase() === root.toLowerCase())
+  if (!zone) throw new ResponseError('该 Cloudflare 账户下没有这个域名', 400)
+  return zone
+}
+
+const domainFromBody = async (
+  env: Env,
+  body: Record<string, unknown>,
+  settings: Settings,
+  existing?: ManagedDomain
+): Promise<ManagedDomain> => {
   const now = nowIso()
   const root = normalizeHostname(String(body.root || existing?.root || ''))
-  const zoneId = String(body.zoneId || existing?.zoneId || '').trim()
   const cfAccountId = String(body.cfAccountId || existing?.cfAccountId || '').trim()
-  if (!zoneId) throw new ResponseError('Zone ID 不能为空', 400)
   if (!cfAccountId) throw new ResponseError('Cloudflare 账户不能为空', 400)
+  const account = await getCfAccount(env, cfAccountId)
+  if (!account) throw new ResponseError('Cloudflare 账户不存在', 400)
+  const zone = await resolveDomainZone(env, account, root)
   return {
     root,
-    zoneId,
+    zoneId: zone.id,
     cfAccountId,
     enabled: body.enabled === undefined ? existing?.enabled ?? true : Boolean(body.enabled),
     allowedTypes: body.allowedTypes === undefined ? existing?.allowedTypes : parseAllowedTypes(body.allowedTypes, settings.allowedTypes),
@@ -135,7 +185,36 @@ const domainFromBody = (body: Record<string, unknown>, settings: Settings, exist
   }
 }
 
+const loginToMail = async (env: Env, email: string, password: string) => {
+  const res = await fetch(`${env.MAIL_API_BASE_URL.replace(/\/$/, '')}/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, password })
+  })
+  const payload = await res.json<{ code?: number; message?: string; data?: { token?: string }; token?: string }>().catch(() => null)
+  if (!res.ok || !payload) throw new ResponseError('通行证登录失败', 401)
+  const token = payload.data?.token || payload.token
+  if (!token) throw new ResponseError(payload.message || '通行证登录失败', 401)
+  return token
+}
+
+const makeAuthRequest = (token: string) =>
+  new Request('https://ggudnsapi.local/api/auth/me', {
+    headers: { Authorization: token }
+  })
+
 const handleAuth = async (request: Request, env: Env, segments: string[]) => {
+  if (request.method === 'POST' && segments[2] === 'admin-login') {
+    const body = await requireBody(request)
+    const email = String(body.email || '').trim()
+    const password = String(body.password || '')
+    if (!email || !password) throw new ResponseError('请输入邮箱和密码', 400)
+    const token = await loginToMail(env, email, password)
+    const mailUser = await getCurrentMailUser(makeAuthRequest(token), env)
+    const dnsUser = await requireUser(makeAuthRequest(token), env).then(ctx => ctx.dnsUser)
+    if (!isAdminEmail(env, mailUser.email)) throw new ResponseError('当前账号不是 DNS 管理员', 403)
+    return ok({ token, mailUser, user: dnsUser, isAdmin: true })
+  }
   if ((request.method === 'GET' && segments[2] === 'me') || (request.method === 'POST' && segments[2] === 'callback')) {
     const { mailUser, dnsUser } = await requireUser(request, env)
     return ok({ mailUser, user: dnsUser, isAdmin: isAdminEmail(env, mailUser.email) })
@@ -171,6 +250,27 @@ const handlePoints = async (request: Request, env: Env) => {
   return ok({ balance: dnsUser.points, logs: await listUserPointLogs(env, dnsUser.uid) })
 }
 
+const makeManualUser = async (env: Env, body: Record<string, unknown>, existing?: DnsUser): Promise<DnsUser> => {
+  const now = nowIso()
+  const email = String(body.email || existing?.email || '').trim().toLowerCase()
+  if (!email || !email.includes('@')) throw new ResponseError('邮箱不正确', 400)
+  const uid = String(body.uid || existing?.uid || email).trim()
+  if (!uid) throw new ResponseError('UID 不能为空', 400)
+  const points = body.points === undefined ? existing?.points ?? 0 : Number(body.points)
+  if (!Number.isFinite(points) || points < 0) throw new ResponseError('积分不正确', 400)
+  return {
+    uid,
+    email,
+    name: body.name === undefined ? existing?.name : String(body.name || '').trim(),
+    points,
+    initialGrantDone: true,
+    banned: body.banned === undefined ? existing?.banned : Boolean(body.banned),
+    bannedReason: body.bannedReason === undefined ? existing?.bannedReason : String(body.bannedReason || '').trim(),
+    createdAt: existing?.createdAt || now,
+    lastSeenAt: existing?.lastSeenAt || now
+  }
+}
+
 const handleAdminUsers = async (request: Request, env: Env, segments: string[]) => {
   if (request.method === 'GET' && segments.length === 3) {
     const records = await listAllRecordSummaries(env)
@@ -182,6 +282,14 @@ const handleAdminUsers = async (request: Request, env: Env, segments: string[]) 
       }))
     )
   }
+  if (request.method === 'POST' && segments.length === 3) {
+    const body = await requireBody(request)
+    const existing = await getUserByEmail(env, String(body.email || '').trim().toLowerCase())
+    if (existing) throw new ResponseError('该邮箱用户已存在', 400)
+    const user = await makeManualUser(env, body)
+    await putUser(env, user)
+    return ok(user)
+  }
   if (request.method === 'PATCH' && segments[4] === 'points') {
     const uid = segments[3]
     const user = await getUser(env, uid)
@@ -190,6 +298,29 @@ const handleAdminUsers = async (request: Request, env: Env, segments: string[]) 
     const delta = Number(body.delta)
     const result = await adjustPoints(env, user, delta, typeof body.message === 'string' ? body.message : undefined)
     return ok(result)
+  }
+  if (request.method === 'PATCH' && segments[4] === 'ban') {
+    const uid = segments[3]
+    const user = await getUser(env, uid)
+    if (!user) throw new ResponseError('用户不存在', 404)
+    const body = await requireBody(request)
+    const next: DnsUser = {
+      ...user,
+      banned: body.banned === undefined ? true : Boolean(body.banned),
+      bannedReason: typeof body.reason === 'string' ? body.reason : user.bannedReason,
+      lastSeenAt: nowIso()
+    }
+    await putUser(env, next)
+    return ok(next)
+  }
+  if (request.method === 'DELETE' && segments.length === 4) {
+    const uid = segments[3]
+    const user = await getUser(env, uid)
+    if (!user) throw new ResponseError('用户不存在', 404)
+    const records = await listUserRecordSummaries(env, user)
+    if (records.length > 0) throw new ResponseError('该用户仍有解析记录，请先删除解析或封禁用户', 400)
+    await deleteUser(env, user)
+    return ok({ uid })
   }
   throw new ResponseError('接口不存在', 404)
 }
@@ -223,8 +354,7 @@ const handleAdminDomains = async (request: Request, env: Env, segments: string[]
   const settings = await getSettings(env)
   if (request.method === 'GET' && segments.length === 3) return ok(await listDomains(env))
   if (request.method === 'POST' && segments.length === 3) {
-    const domain = domainFromBody(await requireBody(request), settings)
-    if (!(await getCfAccount(env, domain.cfAccountId))) throw new ResponseError('Cloudflare 账户不存在', 400)
+    const domain = await domainFromBody(env, await requireBody(request), settings)
     await putDomain(env, domain)
     return ok(domain)
   }
@@ -232,8 +362,7 @@ const handleAdminDomains = async (request: Request, env: Env, segments: string[]
   const existing = (await listDomains(env)).find(item => item.root === root)
   if (!existing) throw new ResponseError('域名不存在', 404)
   if (request.method === 'PATCH' && segments.length === 4) {
-    const domain = domainFromBody(await requireBody(request), settings, existing)
-    if (!(await getCfAccount(env, domain.cfAccountId))) throw new ResponseError('Cloudflare 账户不存在', 400)
+    const domain = await domainFromBody(env, await requireBody(request), settings, existing)
     await putDomain(env, domain)
     return ok(domain)
   }

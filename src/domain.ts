@@ -4,7 +4,27 @@ import { getOwner, listBlacklist } from './kv'
 import { listDnsRecords } from './cloudflare'
 import type { CfAccount } from './types'
 
-const SUPPORTED_TYPES: DnsRecordType[] = ['A', 'AAAA', 'CNAME', 'TXT', 'MX']
+const SUPPORTED_TYPES: DnsRecordType[] = [
+  'A',
+  'AAAA',
+  'CNAME',
+  'HTTPS',
+  'TXT',
+  'SRV',
+  'LOC',
+  'MX',
+  'NS',
+  'CERT',
+  'DNSKEY',
+  'DS',
+  'NAPTR',
+  'SMIMEA',
+  'SSHFP',
+  'SVCB',
+  'TLSA',
+  'URI',
+  'CAA'
+]
 
 export const normalizeHostname = (value: string) => {
   const host = value.trim().toLowerCase().replace(/\.$/, '')
