@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "dev:frontend": "cd frontend && pnpm dev",
+    "build:frontend": "cd frontend && pnpm build",
+    "deploy": "pnpm build:frontend && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
