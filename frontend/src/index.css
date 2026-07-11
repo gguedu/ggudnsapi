@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: oklch(0.99 0.001 250);
+  --color-foreground: oklch(0.21 0.02 256);
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.21 0.02 256);
+  --color-popover: oklch(1 0 0);
+  --color-popover-foreground: oklch(0.21 0.02 256);
+  --color-primary: oklch(0.52 0.19 262);
+  --color-primary-foreground: oklch(0.99 0.005 262);
+  --color-secondary: oklch(0.96 0.01 256);
+  --color-secondary-foreground: oklch(0.21 0.02 256);
+  --color-muted: oklch(0.965 0.008 256);
+  --color-muted-foreground: oklch(0.52 0.02 256);
+  --color-accent: oklch(0.96 0.01 256);
+  --color-accent-foreground: oklch(0.21 0.02 256);
+  --color-destructive: oklch(0.55 0.22 27);
+  --color-destructive-foreground: oklch(0.99 0 0);
+  --color-success: oklch(0.6 0.15 150);
+  --color-success-foreground: oklch(0.99 0 0);
+  --color-warning: oklch(0.7 0.17 75);
+  --color-warning-foreground: oklch(0.2 0.02 75);
+  --color-border: oklch(0.92 0.005 256);
+  --color-input: oklch(0.92 0.005 256);
+  --color-ring: oklch(0.52 0.19 262);
+  --color-sidebar: oklch(0.985 0.001 250);
+  --color-sidebar-foreground: oklch(0.21 0.02 256);
+  --color-sidebar-primary: oklch(0.52 0.19 262);
+  --color-sidebar-primary-foreground: oklch(0.99 0.005 262);
+  --color-sidebar-accent: oklch(0.95 0.012 256);
+  --color-sidebar-accent-foreground: oklch(0.21 0.02 256);
+  --color-sidebar-border: oklch(0.92 0.005 256);
+  --color-sidebar-ring: oklch(0.52 0.19 262);
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.875rem;
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    @apply border-border;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    font-feature-settings: "cv11", "ss01", "ss03";
+  }
+
+  /* 数字与代码使用等宽字体 */
+  .font-mono {
+    font-family: "JetBrains Mono", "Fira Code", "SF Mono", "Consolas", monospace;
+    font-feature-settings: "calt" 0;
+  }
+}
+
+/* 自定义滚动条 */
+@layer base {
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: oklch(0.85 0.008 256);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: oklch(0.75 0.012 256);
+  }
+}

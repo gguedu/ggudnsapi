@@ -5,6 +5,8 @@
 .nitro
 .cache
 dist
+frontend/dist
+*.tsbuildinfo
 .wrangler
 
 # Node dependencies

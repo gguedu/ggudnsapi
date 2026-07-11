@@ -8,7 +8,7 @@ GGU DNS 分发平台后端，部署到 Cloudflare Worker。
 - 使用 GGU 通行证 token 鉴权
 - 管理用户积分和解析记录
 - 调用 Cloudflare API 创建/删除 DNS 记录
-- 提供后台管理页 `/admin.html`
+- 提供 React 管理后台 `/`
 
 ---
 
@@ -100,8 +100,10 @@ not_found_handling = "single-page-application"
 后台地址：
 
 ```text
-https://你的-worker域名/admin.html
+https://你的-worker域名/
 ```
+
+React/Vite 源码位于 `frontend/`，执行 `pnpm build` 会编译到 `public/`，`pnpm deploy` 会先自动构建再部署。
 
 ---
 
@@ -146,23 +148,18 @@ GGU Web 里 token 存在：
 localStorage.mail_token
 ```
 
-后台 `/admin.html` 进入流程：
+后台 `/` 进入流程：
 
-1. 管理员先在 GGU Web / 邮箱系统登录。
-2. 浏览器控制台取 token：
-
-```js
-localStorage.getItem('mail_token')
-```
-
-3. 打开：
+1. 打开：
 
 ```text
-https://你的-worker域名/admin.html
+https://你的-worker域名/
 ```
 
-4. 粘贴 token。
-5. 后台会先请求：
+2. 输入 GGU 通行证管理员邮箱和密码。
+3. 后台调用 `POST /api/auth/admin-login`，Worker 向通行证 Worker 登录并取得 token。
+4. Worker 校验当前邮箱是否在 `DNS_ADMIN_EMAILS`；验证成功后前端将 token 保存到 `localStorage.mail_token`。
+5. 后台随后请求：
 
 ```http
 GET /api/auth/me
@@ -170,8 +167,7 @@ Authorization: <mail_token>
 ```
 
 6. Worker 会去 `MAIL_API_BASE_URL` 对应的通行证 Worker 校验这个 token。
-7. 校验通过后，再检查邮箱是否在 `DNS_ADMIN_EMAILS`。
-8. 只有管理员才能进入后台。
+7. 只有管理员才能进入后台；已有 token 时页面会自动恢复会话。
 
 同时，所有 `/api/admin/**` 接口也会再次校验管理员权限。
 
@@ -204,10 +200,10 @@ Zone:DNS:Edit
 打开：
 
 ```text
-/admin.html
+/
 ```
 
-通过管理员 token 验证后，按顺序配置。
+输入管理员邮箱和密码登录。
 
 ### 5.1 设置
 
@@ -475,13 +471,25 @@ pnpm install
 pnpm typecheck
 ```
 
-本地启动：
+本地启动 Worker（使用已构建的 `public/`）：
 
 ```powershell
 pnpm dev
 ```
 
-部署：
+单独开发 React 前端（自动代理 `/api` 到 `http://localhost:8787`）：
+
+```powershell
+pnpm dev:frontend
+```
+
+构建前端：
+
+```powershell
+pnpm build
+```
+
+部署（会先自动构建）：
 
 ```powershell
 pnpm deploy
@@ -496,10 +504,10 @@ pnpm deploy
 打开：
 
 ```text
-https://你的-worker域名/admin.html
+https://你的-worker域名/
 ```
 
-粘贴管理员 token。
+输入管理员邮箱和密码。
 
 预期：
 
@@ -691,7 +699,7 @@ claude-test.example.com
 [ ] CREDENTIALS_ENCRYPTION_KEY 已设置 secret
 [ ] GGU Web 配了 NUXT_PUBLIC_DNS_API_BASE_URL
 [ ] CF Token 有 Zone:Zone:Read 和 Zone:DNS:Edit
-[ ] /admin.html 能进入
+[ ] / 管理后台能进入并使用账号密码登录
 [ ] CF 账户能自动读到账户名称
 [ ] 域名池只填域名 + 选账户能接入成功
 [ ] /services 能打开 DNS 前台
