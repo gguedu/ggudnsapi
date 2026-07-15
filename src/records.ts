@@ -1,13 +1,12 @@
-import type { CfAccount, DnsRecord, DnsRecordInput, DnsRecordType, DnsUser, Env, ManagedDomain, Settings } from './types'
+import type { CfAccount, DnsRecord, DnsRecordInput, DnsRecordType, DnsUser, Env, ManagedDomain, OwnerRecord, Settings } from './types'
 import { createDnsRecord, patchDnsRecord, safeDeleteDnsRecord } from './cloudflare'
-import { ResponseError, getClientIp, nowIso, randomId } from './http'
+import { ResponseError, nowIso, randomId } from './http'
 import {
   deleteOwner,
   deleteRecordIndexes,
   getCfAccount,
   getOwner,
   getRecord,
-  listDomainRecords,
   listDomains,
   listRecords,
   listUserRecords,
@@ -23,8 +22,6 @@ import {
   getSecondLevel,
   validateRecordInput
 } from './domain'
-
-type SubdomainCheck = Awaited<ReturnType<typeof assertSubdomainAllowed>>
 
 export const publicDomain = (domain: ManagedDomain, settings: Settings) => ({
   root: domain.root,
@@ -60,7 +57,7 @@ const buildRecord = (
   cfRecordId: string,
   secondLevel: string,
   pointCost: number,
-  request: Request
+  clientIp: string
 ): DnsRecord => {
   const now = nowIso()
   return {
@@ -81,64 +78,83 @@ const buildRecord = (
     pointCost,
     enabled: true,
     status: 'active',
-    createIp: getClientIp(request),
+    createIp: clientIp,
     createdAt: now,
     updatedAt: now,
     lastRefreshAt: now
   }
 }
 
-const ensureOwner = async (env: Env, user: DnsUser, record: DnsRecord, subdomain: SubdomainCheck) => {
-  if (subdomain.ownerExists) return
-  await putOwner(env, {
-    root: record.root,
-    secondLevel: record.secondLevel,
-    uid: user.uid,
-    firstRecordId: record.id,
-    createdAt: record.createdAt,
-    updatedAt: record.updatedAt
-  })
+const ownerForRecord = (user: DnsUser, record: DnsRecord): OwnerRecord => ({
+  root: record.root,
+  secondLevel: record.secondLevel,
+  uid: user.uid,
+  firstRecordId: record.id,
+  createdAt: record.createdAt,
+  updatedAt: record.updatedAt
+})
+
+const cleanupOwnerIfUnused = async (env: Env, record: DnsRecord, stillUsed: boolean) => {
+  if (stillUsed) return false
+  const owner = await getOwner(env, record.root, record.secondLevel)
+  if (!owner || owner.uid !== record.uid) return false
+  await deleteOwner(env, record.root, record.secondLevel)
+  return true
 }
 
-const cleanupOwnerIfUnused = async (env: Env, record: DnsRecord) => {
-  const remaining = await listUserRecords(env, record.uid)
-  const stillUsed = remaining.some(
-    item => item.id !== record.id && item.root === record.root && item.secondLevel === record.secondLevel
-  )
-  if (!stillUsed) await deleteOwner(env, record.root, record.secondLevel)
-}
-
-export const createUserRecord = async (env: Env, request: Request, user: DnsUser, settings: Settings, body: Record<string, unknown>) => {
+export const createUserRecord = async (
+  env: Env,
+  user: DnsUser,
+  settings: Settings,
+  domain: ManagedDomain,
+  body: Record<string, unknown>,
+  clientIp: string,
+  currentOwner: OwnerRecord | null
+) => {
   const operationId = typeof body.operationId === 'string' && body.operationId.trim() ? body.operationId.trim() : randomId()
   const existingRecord = await getRecord(env, operationId)
   if (existingRecord) {
     if (existingRecord.uid !== user.uid) throw new ResponseError('记录操作标识冲突', 409)
-    return { record: serializeRecord(existingRecord), user }
+    return { record: serializeRecord(existingRecord), user, ownerClaim: null }
   }
-  const domains = await listDomains(env)
-  const domain = findManagedDomain(String(body.fullDomain || ''), domains)
+  if (!domain.enabled) throw new ResponseError('域名不在开放域名池内', 400)
   const input = validateRecordInput(body, settings, domain)
   const account = await ensureAccount(env, domain)
   const secondLevel = getSecondLevel(input.fullDomain, domain.root)
   await assertBlacklistAllowed(env, user, input.fullDomain, secondLevel, domain.root)
-  const subdomain = await assertSubdomainAllowed(env, account, domain.zoneId, user.uid, input.fullDomain, domain.root, settings)
+  const subdomain = await assertSubdomainAllowed(
+    env,
+    account,
+    domain.zoneId,
+    user.uid,
+    input.fullDomain,
+    domain.root,
+    settings,
+    currentOwner
+  )
   await assertFullDomainTypeAvailable(env, account, domain.zoneId, input.fullDomain, input.type)
 
   const pointCost = domain.pointCost || 1
   if (user.points < pointCost) throw new ResponseError('积分不足', 400)
 
   const cfRecord = await createDnsRecord(env, account, domain.zoneId, input)
-  const record = { ...buildRecord(user, domain, input, cfRecord.id, subdomain.secondLevel, pointCost, request), id: operationId }
+  const record = { ...buildRecord(user, domain, input, cfRecord.id, subdomain.secondLevel, pointCost, clientIp), id: operationId }
+  const ownerClaim = subdomain.claimRequired ? ownerForRecord(user, record) : null
 
   try {
     await putRecord(env, record)
-    await ensureOwner(env, user, record, subdomain)
+    if (ownerClaim) await putOwner(env, ownerClaim)
     const { user: nextUser } = await spendPoints(env, user, pointCost, record.id)
-    return { record: serializeRecord(record), user: nextUser }
+    return { record: serializeRecord(record), user: nextUser, ownerClaim }
   } catch (error) {
     await safeDeleteDnsRecord(env, account, domain.zoneId, cfRecord.id).catch(() => false)
     await deleteRecordIndexes(env, record).catch(() => undefined)
-    if (!subdomain.ownerExists) await deleteOwner(env, record.root, record.secondLevel).catch(() => undefined)
+    if (ownerClaim) {
+      const owner = await getOwner(env, record.root, record.secondLevel).catch(() => null)
+      if (owner?.uid === ownerClaim.uid && owner.firstRecordId === ownerClaim.firstRecordId) {
+        await deleteOwner(env, record.root, record.secondLevel).catch(() => undefined)
+      }
+    }
     throw error
   }
 }
@@ -191,35 +207,48 @@ export const updateUserRecord = async (env: Env, user: DnsUser, settings: Settin
   return serializeRecord(next)
 }
 
-export const deleteUserRecord = async (env: Env, user: DnsUser, settings: Settings, id: string) => {
+export const deleteUserRecord = async (
+  env: Env,
+  user: DnsUser,
+  settings: Settings,
+  id: string,
+  ownerStillUsed: boolean
+) => {
   const record = assertRecordOwner(await getRecord(env, id), user)
-  const domain = (await listDomains(env)).find(item => item.root === record.root)
-  const account = domain ? await ensureAccount(env, domain) : undefined
+  const account = await getCfAccount(env, record.cfAccountId)
+  if (!account) throw new ResponseError('Cloudflare 账户不存在', 500)
 
-  if (account && record.cfRecordId) {
+  if (record.cfRecordId) {
     await safeDeleteDnsRecord(env, account, record.zoneId, record.cfRecordId)
   }
   await deleteRecordIndexes(env, record)
-  await cleanupOwnerIfUnused(env, record)
+  const ownerDeleted = await cleanupOwnerIfUnused(env, record, ownerStillUsed)
 
-  let nextUser = user
-  if (settings.deleteRefundEnabled && record.pointCost > 0) {
-    nextUser = (await refundPoints(env, user, record.pointCost, record.id)).user
-  }
-  return { record, user: nextUser }
+  return { record, user, ownerDeleted }
 }
 
-export const toggleUserRecord = async (env: Env, user: DnsUser, settings: Settings, id: string) => {
+export const refundDeletedRecord = async (env: Env, user: DnsUser, settings: Settings, record: DnsRecord) => {
+  if (!settings.deleteRefundEnabled || record.pointCost <= 0) return user
+  return (await refundPoints(env, user, record.pointCost, record.id)).user
+}
+
+export const toggleUserRecord = async (
+  env: Env,
+  user: DnsUser,
+  settings: Settings,
+  id: string,
+  domain: ManagedDomain,
+  currentOwner: OwnerRecord | null
+) => {
   const record = assertRecordOwner(await getRecord(env, id), user)
-  const domain = (await listDomains(env)).find(item => item.root === record.root)
-  if (!domain) throw new ResponseError('域名池配置不存在', 500)
+  if (domain.root !== record.root) throw new ResponseError('域名池配置不存在', 500)
   const account = await ensureAccount(env, domain)
 
   if (record.enabled) {
     await safeDeleteDnsRecord(env, account, record.zoneId, record.cfRecordId)
     const next: DnsRecord = { ...record, enabled: false, status: 'missing', updatedAt: nowIso(), lastRefreshAt: nowIso() }
     await putRecord(env, next)
-    return serializeRecord(next)
+    return { record: serializeRecord(next), ownerClaim: null }
   }
 
   const input: DnsRecordInput = {
@@ -233,7 +262,16 @@ export const toggleUserRecord = async (env: Env, user: DnsUser, settings: Settin
   }
   validateRecordInput({ ...input }, settings, domain)
   await assertBlacklistAllowed(env, user, record.fullDomain, record.secondLevel, record.root)
-  await assertSubdomainAllowed(env, account, record.zoneId, user.uid, record.fullDomain, record.root, settings)
+  const subdomain = await assertSubdomainAllowed(
+    env,
+    account,
+    record.zoneId,
+    user.uid,
+    record.fullDomain,
+    record.root,
+    settings,
+    currentOwner
+  )
   await assertFullDomainTypeAvailable(env, account, record.zoneId, record.fullDomain, record.type)
   const cfRecord = await createDnsRecord(env, account, record.zoneId, input)
   const next: DnsRecord = {
@@ -244,8 +282,23 @@ export const toggleUserRecord = async (env: Env, user: DnsUser, settings: Settin
     updatedAt: nowIso(),
     lastRefreshAt: nowIso()
   }
-  await putRecord(env, next)
-  return serializeRecord(next)
+  const ownerClaim = subdomain.claimRequired ? ownerForRecord(user, next) : null
+  try {
+    await putRecord(env, next)
+    if (ownerClaim) await putOwner(env, ownerClaim)
+    return { record: serializeRecord(next), ownerClaim }
+  } catch (error) {
+    await safeDeleteDnsRecord(env, account, record.zoneId, cfRecord.id).catch(() => false)
+    await deleteRecordIndexes(env, next).catch(() => undefined)
+    await putRecord(env, record).catch(() => undefined)
+    if (ownerClaim) {
+      const owner = await getOwner(env, record.root, record.secondLevel).catch(() => null)
+      if (owner?.uid === ownerClaim.uid && owner.firstRecordId === ownerClaim.firstRecordId) {
+        await deleteOwner(env, record.root, record.secondLevel).catch(() => undefined)
+      }
+    }
+    throw error
+  }
 }
 
 export const listUserRecordSummaries = async (env: Env, user: DnsUser) =>

@@ -16,12 +16,11 @@ import { ResponseError, corsHeaders, fail, nowIso, ok, randomId, readJson } from
 import {
   deleteBlacklist,
   deleteCfAccount,
-  deleteDomain,
-  deleteUser,
   getBanReasonPreset,
   getCfAccount,
   getRedemptionCodeIndex,
   getRedemptionCodeIndexByHash,
+  getRecord,
   getSettings,
   getUser,
   getUserByEmail,
@@ -29,32 +28,41 @@ import {
   listBlacklist,
   listCfAccounts,
   listDomains,
-  listDomainRecords,
   listRedemptionCodeIndexes,
   listUserPointLogs,
   listUsers,
-  putBanEvent,
   putBanReasonPreset,
   putBlacklist,
   putCfAccount,
-  putDomain,
   putRedemptionCodeIndex,
-  putSettings,
-  putUser
+  putSettings
 } from './kv'
-import { adjustPoints, redeemPoints } from './points'
+import { redeemPoints } from './points'
+export { DomainCoordinator } from './domain-coordinator'
 export { RedemptionCodeObject } from './redemption'
 export { UserAccessObject } from './user-access'
+export { UserCoordinator } from './user-coordinator'
 export { UserPointsObject } from './user-points'
 import {
-  createUserRecord,
-  deleteUserRecord,
   listAllRecordSummaries,
   listUserRecordSummaries,
-  recordsMeta,
-  toggleUserRecord,
-  updateUserRecord
+  recordsMeta
 } from './records'
+import {
+  deleteCoordinatedDomain,
+  getCoordinatedDomain,
+  putCoordinatedDomain
+} from './domain-coordinator-client'
+import {
+  adjustCoordinatedPoints,
+  createCoordinatedUser,
+  createUserCoordinatedRecord,
+  deleteCoordinatedUser,
+  deleteUserCoordinatedRecord,
+  setCoordinatedBan,
+  toggleUserCoordinatedRecord,
+  updateUserCoordinatedRecord
+} from './user-coordinator-client'
 
 const SUPPORTED_TYPES: DnsRecordType[] = [
   'A',
@@ -295,16 +303,27 @@ const handleRecords = async (request: Request, env: Env, segments: string[]) => 
   if (request.method === 'GET' && segments.length === 2) return ok(await listUserRecordSummaries(env, dnsUser))
   if (request.method === 'POST' && segments.length === 2) {
     const body = await requireBody(request)
-    return ok(await createUserRecord(env, request, dnsUser, settings, body))
+    const domain = findManagedDomain(String(body.fullDomain || ''), await listDomains(env))
+    return ok(await createUserCoordinatedRecord(env, dnsUser.uid, domain.root, request, settings, body))
   }
   const id = segments[2]
   if (!id) throw new ResponseError('接口不存在', 404)
-  if (request.method === 'PATCH' && segments[3] === 'toggle') return ok(await toggleUserRecord(env, dnsUser, settings, id))
-  if (request.method === 'PATCH' && segments.length === 3) {
-    const body = await requireBody(request)
-    return ok(await updateUserRecord(env, dnsUser, settings, id, body))
+  if (request.method === 'PATCH' && segments[3] === 'toggle') {
+    const record = await getRecord(env, id)
+    if (!record) throw new ResponseError('解析记录不存在', 404)
+    return ok(await toggleUserCoordinatedRecord(env, dnsUser.uid, record.root, settings, id))
   }
-  if (request.method === 'DELETE' && segments.length === 3) return ok(await deleteUserRecord(env, dnsUser, settings, id))
+  if (request.method === 'PATCH' && segments.length === 3) {
+    const record = await getRecord(env, id)
+    if (!record) throw new ResponseError('解析记录不存在', 404)
+    const body = await requireBody(request)
+    return ok(await updateUserCoordinatedRecord(env, dnsUser.uid, record.root, settings, id, body))
+  }
+  if (request.method === 'DELETE' && segments.length === 3) {
+    const record = await getRecord(env, id)
+    if (!record) throw new ResponseError('解析记录不存在', 404)
+    return ok(await deleteUserCoordinatedRecord(env, dnsUser.uid, record.root, settings, id))
+  }
   throw new ResponseError('接口不存在', 404)
 }
 
@@ -404,27 +423,20 @@ const handleAdminUsers = async (
     const existing = await getUserByEmail(env, String(body.email || '').trim().toLowerCase())
     if (existing) throw new ResponseError('该邮箱用户已存在', 400)
     const user = await makeManualUser(env, body)
-    if (await getUser(env, user.uid)) throw new ResponseError('该 UID 用户已存在', 409)
-    const initialization = await env.USER_POINTS.getByName(user.uid).initializeUser(user.uid, user.points)
-    if (!initialization.ok) throw new ResponseError(initialization.message, 500)
-    if (!initialization.created) throw new ResponseError('该 UID 已存在积分账本，不能重复创建', 409)
-    await putUser(env, user)
-    return ok(user)
+    return ok(await createCoordinatedUser(env, user))
   }
   if (request.method === 'PATCH' && segments[4] === 'points') {
-    const uid = segments[3]
-    const user = await getUser(env, uid)
-    if (!user) throw new ResponseError('用户不存在', 404)
+    const uid = decodeURIComponent(segments[3])
     const body = await requireBody(request)
-    const delta = Number(body.delta)
-    const result = await adjustPoints(
-      env,
-      user,
-      delta,
-      typeof body.message === 'string' ? body.message : undefined,
-      typeof body.operationId === 'string' && body.operationId ? body.operationId : randomId()
+    return ok(
+      await adjustCoordinatedPoints(
+        env,
+        uid,
+        Number(body.delta),
+        typeof body.message === 'string' ? body.message : undefined,
+        typeof body.operationId === 'string' && body.operationId ? body.operationId : randomId()
+      )
     )
-    return ok(result)
   }
   if (request.method === 'GET' && segments[4] === 'ban-events') {
     const uid = segments[3]
@@ -433,7 +445,7 @@ const handleAdminUsers = async (
     return ok(await env.USER_ACCESS.getByName(uid).listEvents())
   }
   if (request.method === 'PATCH' && segments[4] === 'ban') {
-    const uid = segments[3]
+    const uid = decodeURIComponent(segments[3])
     const user = await getUser(env, uid)
     if (!user) throw new ResponseError('用户不存在', 404)
     const body = await requireBody(request)
@@ -443,37 +455,19 @@ const handleAdminUsers = async (
     if (presetId && (!preset || !preset.active)) throw new ResponseError('封禁理由预设不存在或已停用', 400)
     const reason = typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : preset?.reason
     if (banned && !reason) throw new ResponseError('请选择或填写封禁理由', 400)
-    const result = await env.USER_ACCESS.getByName(uid).mutate({
-      uid,
-      banned,
-      reason: banned ? reason : typeof body.reason === 'string' ? body.reason.trim() || undefined : undefined,
-      presetId: banned && preset ? preset.id : undefined,
-      actorUid: admin.mailUser.uid,
-      actorEmail: admin.mailUser.email,
-      operationId: typeof body.operationId === 'string' && body.operationId ? body.operationId : randomId()
-    })
-    const next: DnsUser = {
-      ...user,
-      banned: result.banned,
-      bannedReason: result.reason,
-      bannedAt: result.bannedAt,
-      bannedByUid: result.bannedByUid,
-      bannedByEmail: result.bannedByEmail
-    }
-    // DO state and audit are canonical and committed atomically. The user document
-    // remains the fast authorization mirror and is safe to repair on retry.
-    await putUser(env, next)
-    await putBanEvent(env, result.event).catch(() => undefined)
-    return ok({ user: next, event: result.event })
+    return ok(
+      await setCoordinatedBan(env, uid, {
+        banned,
+        reason: banned ? reason : typeof body.reason === 'string' ? body.reason.trim() || undefined : undefined,
+        presetId: banned && preset ? preset.id : undefined,
+        actorUid: admin.mailUser.uid,
+        actorEmail: admin.mailUser.email,
+        operationId: typeof body.operationId === 'string' && body.operationId ? body.operationId : randomId()
+      })
+    )
   }
   if (request.method === 'DELETE' && segments.length === 4) {
-    const uid = segments[3]
-    const user = await getUser(env, uid)
-    if (!user) throw new ResponseError('用户不存在', 404)
-    const records = await listUserRecordSummaries(env, user)
-    if (records.length > 0) throw new ResponseError('该用户仍有解析记录，请先删除解析或封禁用户', 400)
-    await deleteUser(env, user)
-    return ok({ uid })
+    return ok(await deleteCoordinatedUser(env, decodeURIComponent(segments[3])))
   }
   throw new ResponseError('接口不存在', 404)
 }
@@ -508,26 +502,21 @@ const handleAdminDomains = async (request: Request, env: Env, segments: string[]
   if (request.method === 'GET' && segments.length === 3) return ok(await listDomains(env))
   if (request.method === 'POST' && segments.length === 3) {
     const domain = await domainFromBody(env, await requireBody(request), settings)
-    await putDomain(env, domain)
-    return ok(domain)
+    return ok(await putCoordinatedDomain(env, domain, 'create'))
   }
-  const root = segments[3] ? decodeURIComponent(segments[3]) : ''
-  const existing = (await listDomains(env)).find(item => item.root === root)
+  const root = segments[3] ? normalizeHostname(decodeURIComponent(segments[3])) : ''
+  const existing = root ? await getCoordinatedDomain(env, root) : null
   if (!existing) throw new ResponseError('域名不存在', 404)
   if (request.method === 'PATCH' && segments.length === 4) {
-    const domain = await domainFromBody(env, await requireBody(request), settings, existing)
-    await putDomain(env, domain)
-    return ok(domain)
+    const body = await requireBody(request)
+    if (body.root !== undefined && normalizeHostname(String(body.root)) !== existing.root) {
+      throw new ResponseError('域名不可修改', 400)
+    }
+    const domain = await domainFromBody(env, { ...body, root: existing.root }, settings, existing)
+    return ok(await putCoordinatedDomain(env, domain, 'update'))
   }
   if (request.method === 'DELETE' && segments.length === 4) {
-    const records = await listDomainRecords(env, existing.root)
-    if (records.length > 0) {
-      const next = { ...existing, enabled: false, updatedAt: nowIso() }
-      await putDomain(env, next)
-      return ok(next)
-    }
-    await deleteDomain(env, existing.root)
-    return ok({ root: existing.root })
+    return ok(await deleteCoordinatedDomain(env, existing.root))
   }
   throw new ResponseError('接口不存在', 404)
 }

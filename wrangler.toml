@@ -24,9 +24,21 @@ class_name = "UserPointsObject"
 name = "USER_ACCESS"
 class_name = "UserAccessObject"
 
+[[durable_objects.bindings]]
+name = "DOMAIN_COORDINATOR"
+class_name = "DomainCoordinator"
+
+[[durable_objects.bindings]]
+name = "USER_COORDINATOR"
+class_name = "UserCoordinator"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RedemptionCodeObject", "UserPointsObject", "UserAccessObject"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["DomainCoordinator", "UserCoordinator"]
 
 [vars]
 MAIL_API_BASE_URL = "https://mail.ggu.edu.kg/api"

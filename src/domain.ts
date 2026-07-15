@@ -1,6 +1,6 @@
-import type { BlacklistRule, DnsRecordInput, DnsRecordType, DnsUser, Env, ManagedDomain, Settings } from './types'
+import type { BlacklistRule, DnsRecordInput, DnsRecordType, DnsUser, Env, ManagedDomain, OwnerRecord, Settings } from './types'
 import { ResponseError } from './http'
-import { getOwner, listBlacklist } from './kv'
+import { listBlacklist } from './kv'
 import { listDnsRecords } from './cloudflare'
 import type { CfAccount } from './types'
 
@@ -120,21 +120,21 @@ export const assertSubdomainAllowed = async (
   uid: string,
   fullDomain: string,
   root: string,
-  settings: Settings
+  settings: Settings,
+  owner: OwnerRecord | null
 ) => {
   const secondLevel = getSecondLevel(fullDomain, root)
-  if (!settings.protectionEnabled) return { secondLevel, ownerExists: false }
+  if (!settings.protectionEnabled) return { secondLevel, owner: null, claimRequired: false }
 
-  const owner = await getOwner(env, root, secondLevel)
   if (owner && owner.uid !== uid) throw new ResponseError('该域名暂时无法创建', 403)
-  if (owner) return { secondLevel, ownerExists: true }
+  if (owner) return { secondLevel, owner, claimRequired: false }
 
   const secondLevelRecords = await listDnsRecords(env, account, zoneId, secondLevel)
   if (secondLevelRecords.length > 0) {
     throw new ResponseError('该域名暂时无法创建', 403)
   }
 
-  return { secondLevel, ownerExists: false }
+  return { secondLevel, owner: null, claimRequired: true }
 }
 
 export const assertFullDomainTypeAvailable = async (

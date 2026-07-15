@@ -1,12 +1,16 @@
+import type { DomainCoordinator } from './domain-coordinator'
 import type { RedemptionCodeObject } from './redemption'
 import type { UserAccessObject } from './user-access'
+import type { UserCoordinator } from './user-coordinator'
 import type { UserPointsObject } from './user-points'
 
 export interface Env {
   DNS_KV: KVNamespace
   ASSETS: Fetcher
+  DOMAIN_COORDINATOR: DurableObjectNamespace<DomainCoordinator>
   REDEMPTION_CODES: DurableObjectNamespace<RedemptionCodeObject>
   USER_ACCESS: DurableObjectNamespace<UserAccessObject>
+  USER_COORDINATOR: DurableObjectNamespace<UserCoordinator>
   USER_POINTS: DurableObjectNamespace<UserPointsObject>
   MAIL_API_BASE_URL: string
   ALLOWED_ORIGIN: string
