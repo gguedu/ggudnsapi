@@ -1,4 +1,6 @@
 import type {
+  BanEvent,
+  BanReasonPreset,
   BlacklistRule,
   CfAccount,
   DnsRecord,
@@ -23,6 +25,10 @@ export const keys = {
   owner: (root: string, secondLevel: string) => `owner:${root}:${secondLevel}`,
   record: (id: string) => `record:${id}`,
   userRecord: (uid: string, id: string) => `user-record:${uid}:${id}`,
+  banReasonPreset: (id: string) => `ban-reason-preset:${id}`,
+  banEvent: (uid: string, stamp: string, id: string) => `ban-event:${uid}:${stamp}:${id}`,
+  redemptionCodeIndex: (id: string) => `redemption-code-index:${id}`,
+  redemptionHashIndex: (hash: string) => `redemption-hash-index:${hash}`,
   domainRecord: (root: string, id: string) => `domain-record:${root}:${id}`,
   cfRecord: (cfRecordId: string) => `cf-record:${cfRecordId}`,
   blacklist: (id: string) => `blacklist:${id}`
@@ -152,3 +158,32 @@ export const listDomainRecords = async (env: Env, root: string) => {
 export const listBlacklist = (env: Env) => listValues<BlacklistRule>(env, 'blacklist:')
 export const putBlacklist = (env: Env, rule: BlacklistRule) => kvPut(env, keys.blacklist(rule.id), rule)
 export const deleteBlacklist = (env: Env, id: string) => kvDelete(env, keys.blacklist(id))
+
+export const listBanReasonPresets = async (env: Env) =>
+  (await listValues<BanReasonPreset>(env, 'ban-reason-preset:')).sort((a, b) => a.reason.localeCompare(b.reason, 'zh-CN'))
+export const getBanReasonPreset = (env: Env, id: string) => kvGet<BanReasonPreset>(env, keys.banReasonPreset(id))
+export const putBanReasonPreset = (env: Env, preset: BanReasonPreset) => kvPut(env, keys.banReasonPreset(preset.id), preset)
+
+export const putBanEvent = (env: Env, event: BanEvent) =>
+  kvPut(env, keys.banEvent(event.uid, event.createdAt, event.id), event)
+export const listBanEvents = async (env: Env, uid?: string) => {
+  const events = await listValues<BanEvent>(env, uid ? `ban-event:${uid}:` : 'ban-event:')
+  return events.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+}
+
+export interface RedemptionCodeIndex {
+  id: string
+  objectName: string
+}
+
+export const putRedemptionCodeIndex = async (env: Env, id: string, objectName: string) => {
+  const marker: RedemptionCodeIndex = { id, objectName }
+  await kvPut(env, keys.redemptionCodeIndex(id), marker)
+  await kvPut(env, keys.redemptionHashIndex(objectName), marker)
+}
+export const getRedemptionCodeIndex = (env: Env, id: string) =>
+  kvGet<RedemptionCodeIndex>(env, keys.redemptionCodeIndex(id))
+export const getRedemptionCodeIndexByHash = (env: Env, secretHash: string) =>
+  kvGet<RedemptionCodeIndex>(env, keys.redemptionHashIndex(secretHash))
+export const listRedemptionCodeIndexes = (env: Env) =>
+  listValues<RedemptionCodeIndex>(env, 'redemption-code-index:')

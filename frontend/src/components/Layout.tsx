@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import {
   Loader2, RefreshCw, Users, Cloud, Globe, ShieldBan,
-  Settings, ClipboardList, PanelLeftClose, PanelLeft,
+  Settings, ClipboardList, PanelLeftClose, PanelLeft, TicketCheck,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { sidebarVariants, sidebarTransition, pageVariants, pageTransition } from '@/lib/animations'
@@ -20,6 +20,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { id: 'users', label: '用户管理', icon: <Users className="size-4" />, group: '运营' },
   { id: 'records', label: '解析总览', icon: <ClipboardList className="size-4" />, group: '运营' },
+  { id: 'redemption', label: '兑换码', icon: <TicketCheck className="size-4" />, group: '运营' },
   { id: 'accounts', label: 'CF 账户', icon: <Cloud className="size-4" />, group: '基础设施' },
   { id: 'domains', label: '域名池', icon: <Globe className="size-4" />, group: '基础设施' },
   { id: 'blacklist', label: '黑名单', icon: <ShieldBan className="size-4" />, group: '安全' },
@@ -33,6 +34,7 @@ const tabInfo: Record<string, { title: string; description: string }> = {
   blacklist: { title: '黑名单规则', description: '拦截特定域名或用户的解析请求' },
   settings: { title: '系统设置', description: '配置全局解析策略与积分规则' },
   records: { title: '解析记录总览', description: '查看所有用户的 DNS 解析记录' },
+  redemption: { title: '兑换码中心', description: '创建积分兑换码并追踪每一次使用' },
 }
 
 interface Props {
@@ -59,14 +61,14 @@ export default function Layout({
   }, {})
 
   return (
-    <div className="flex min-h-screen bg-background">
+    <div className="min-h-screen bg-background md:flex">
       <motion.aside
         variants={sidebarVariants}
         initial="initial"
         animate="animate"
         transition={sidebarTransition}
         className={cn(
-          'fixed inset-y-0 left-0 z-20 flex flex-col border-r border-sidebar-border bg-sidebar transition-[width] duration-200',
+          'fixed inset-y-0 left-0 z-20 hidden flex-col border-r border-sidebar-border bg-sidebar transition-[width] duration-200 md:flex',
           collapsed ? 'w-16' : 'w-60',
         )}
       >
@@ -121,7 +123,7 @@ export default function Layout({
         </div>
       </motion.aside>
 
-      <div className={cn('flex min-h-screen flex-1 flex-col', collapsed ? 'ml-16' : 'ml-60')}>
+      <div className={cn('flex min-h-screen min-w-0 flex-1 flex-col', collapsed ? 'md:ml-16' : 'md:ml-60')}>
         <header className="sticky top-0 z-10 flex h-14 items-center justify-between gap-4 border-b border-border bg-background/80 px-6 backdrop-blur-sm">
           <div className="min-w-0">
             <h1 className="text-base font-semibold tracking-tight text-foreground">{info.title}</h1>
@@ -132,7 +134,7 @@ export default function Layout({
               variant="ghost"
               size="icon-sm"
               onClick={() => setCollapsed((c) => !c)}
-              className="text-muted-foreground"
+              className="hidden text-muted-foreground md:inline-flex"
               title={collapsed ? '展开侧栏' : '折叠侧栏'}
             >
               {collapsed ? <PanelLeft className="size-4" /> : <PanelLeftClose className="size-4" />}
@@ -144,7 +146,22 @@ export default function Layout({
           </div>
         </header>
 
-        <main className="flex-1 overflow-auto p-6 lg:p-8">
+        <nav className="flex gap-1 overflow-x-auto border-b border-border bg-background px-3 py-2 md:hidden" aria-label="管理功能">
+          {navItems.map(item => (
+            <button
+              key={item.id}
+              onClick={() => onTabChange(item.id)}
+              className={cn(
+                'flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium transition-colors',
+                currentTab === item.id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted',
+              )}
+            >
+              {item.icon}{item.label}
+            </button>
+          ))}
+        </nav>
+
+        <main className="flex-1 overflow-auto p-3 sm:p-5 lg:p-8">
           <div className="mx-auto max-w-7xl">
             <AnimatePresence mode="wait">
               <motion.div

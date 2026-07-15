@@ -1,6 +1,13 @@
+import type { RedemptionCodeObject } from './redemption'
+import type { UserAccessObject } from './user-access'
+import type { UserPointsObject } from './user-points'
+
 export interface Env {
   DNS_KV: KVNamespace
   ASSETS: Fetcher
+  REDEMPTION_CODES: DurableObjectNamespace<RedemptionCodeObject>
+  USER_ACCESS: DurableObjectNamespace<UserAccessObject>
+  USER_POINTS: DurableObjectNamespace<UserPointsObject>
   MAIL_API_BASE_URL: string
   ALLOWED_ORIGIN: string
   DNS_ADMIN_EMAILS: string
@@ -9,9 +16,16 @@ export interface Env {
   CREDENTIALS_ENCRYPTION_KEY?: string
 }
 
+export interface ApiErrorData {
+  code?: string
+  reason?: string
+  bannedAt?: string
+  [key: string]: unknown
+}
+
 export interface ApiEnvelope<T = unknown> {
   success: boolean
-  data?: T
+  data?: T | ApiErrorData
   message?: string
 }
 
@@ -30,6 +44,9 @@ export interface DnsUser {
   initialGrantDone: true
   banned?: boolean
   bannedReason?: string
+  bannedAt?: string
+  bannedByUid?: string
+  bannedByEmail?: string
   createdAt: string
   lastSeenAt: string
 }
@@ -131,10 +148,62 @@ export interface PointLog {
   uid: string
   delta: number
   balanceAfter: number
-  reason: 'initial_grant' | 'create_record' | 'delete_refund' | 'admin_adjust'
+  reason: 'initial_grant' | 'create_record' | 'delete_refund' | 'admin_adjust' | 'redeem_code'
   recordId?: string
+  redemptionCodeId?: string
   message?: string
   createdAt: string
+}
+
+export interface BanReasonPreset {
+  id: string
+  reason: string
+  active: boolean
+  createdAt: string
+  updatedAt: string
+  createdByUid: string
+  createdByEmail: string
+}
+
+export interface BanEvent {
+  id: string
+  uid: string
+  action: 'ban' | 'unban'
+  reason?: string
+  presetId?: string
+  actorUid: string
+  actorEmail: string
+  createdAt: string
+}
+
+export interface RedemptionCodeSummary {
+  id: string
+  label: string
+  maskedCode: string
+  points: number
+  maxUses: number
+  useCount: number
+  active: boolean
+  expiresAt?: string
+  createdAt: string
+  createdByUid: string
+  createdByEmail: string
+}
+
+export interface RedemptionUse {
+  id: string
+  codeId: string
+  codeLabel: string
+  uid: string
+  email: string
+  points: number
+  redeemedAt: string
+  pointLogId?: string
+  status: 'pending' | 'completed'
+}
+
+export interface RedemptionCodeRecord extends RedemptionCodeSummary {
+  secretHash: string
 }
 
 export interface OwnerRecord {

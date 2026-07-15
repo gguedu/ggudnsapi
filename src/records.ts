@@ -109,6 +109,12 @@ const cleanupOwnerIfUnused = async (env: Env, record: DnsRecord) => {
 }
 
 export const createUserRecord = async (env: Env, request: Request, user: DnsUser, settings: Settings, body: Record<string, unknown>) => {
+  const operationId = typeof body.operationId === 'string' && body.operationId.trim() ? body.operationId.trim() : randomId()
+  const existingRecord = await getRecord(env, operationId)
+  if (existingRecord) {
+    if (existingRecord.uid !== user.uid) throw new ResponseError('记录操作标识冲突', 409)
+    return { record: serializeRecord(existingRecord), user }
+  }
   const domains = await listDomains(env)
   const domain = findManagedDomain(String(body.fullDomain || ''), domains)
   const input = validateRecordInput(body, settings, domain)
@@ -122,7 +128,7 @@ export const createUserRecord = async (env: Env, request: Request, user: DnsUser
   if (user.points < pointCost) throw new ResponseError('积分不足', 400)
 
   const cfRecord = await createDnsRecord(env, account, domain.zoneId, input)
-  const record = buildRecord(user, domain, input, cfRecord.id, subdomain.secondLevel, pointCost, request)
+  const record = { ...buildRecord(user, domain, input, cfRecord.id, subdomain.secondLevel, pointCost, request), id: operationId }
 
   try {
     await putRecord(env, record)

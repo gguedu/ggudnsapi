@@ -1,11 +1,13 @@
-import type { Env } from './types'
+import type { ApiErrorData, Env } from './types'
 
 export class ResponseError extends Error {
   status: number
+  data?: ApiErrorData
 
-  constructor(message: string, status = 500) {
+  constructor(message: string, status = 500, data?: ApiErrorData) {
     super(message)
     this.status = status
+    this.data = data
   }
 }
 
@@ -21,8 +23,8 @@ export const json = (data: unknown, status = 200, headers: HeadersInit = {}) => 
 
 export const ok = <T>(data: T, headers: HeadersInit = {}) => json({ success: true, data }, 200, headers)
 
-export const fail = (message: string, status = 500, headers: HeadersInit = {}) =>
-  json({ success: false, message }, status, headers)
+export const fail = (message: string, status = 500, headers: HeadersInit = {}, data?: ApiErrorData) =>
+  json({ success: false, message, ...(data ? { data } : {}) }, status, headers)
 
 export const corsHeaders = (request: Request, env: Env) => {
   const origin = request.headers.get('origin') || ''

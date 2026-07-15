@@ -62,32 +62,65 @@ export const getCurrentMailUser = async (request: Request, env: Env): Promise<Ma
   }
 }
 
-export const ensureDnsUser = async (env: Env, mailUser: MailUserInfo): Promise<DnsUser> => {
+export const ensureDnsUser = async (env: Env, mailUser: MailUserInfo, enforceBan = true): Promise<DnsUser> => {
   const existing = await getUser(env, mailUser.uid)
+  const access = await env.USER_ACCESS.getByName(mailUser.uid).getState()
   const now = nowIso()
   if (existing) {
+    const authoritativeBalance = await env.USER_POINTS.getByName(mailUser.uid).getBalance(existing.points)
     const next: DnsUser = {
       ...existing,
       email: mailUser.email,
       name: mailUser.name || existing.name,
+      points: authoritativeBalance ?? existing.points,
+      banned: access?.banned ?? existing.banned,
+      bannedReason: access ? access.reason : existing.bannedReason,
+      bannedAt: access ? access.bannedAt : existing.bannedAt,
+      bannedByUid: access ? access.bannedByUid : existing.bannedByUid,
+      bannedByEmail: access ? access.bannedByEmail : existing.bannedByEmail,
       lastSeenAt: now
     }
     await putUser(env, next)
-    if (next.banned) throw new ResponseError(next.bannedReason || '用户已被封禁', 403)
+    if (enforceBan && next.banned) {
+      throw new ResponseError('该账号已被限制使用 DNS 服务', 403, {
+        code: 'DNS_USER_BANNED',
+        reason: next.bannedReason || '未提供封禁原因',
+        bannedAt: next.bannedAt
+      })
+    }
     return next
   }
 
   const settings = await getSettings(env)
-  const initialPoints = Number.isFinite(settings.initialPoints) ? settings.initialPoints : Number(env.DEFAULT_INITIAL_POINTS || 1)
+  if (enforceBan && access?.banned) {
+    throw new ResponseError('该账号已被限制使用 DNS 服务', 403, {
+      code: 'DNS_USER_BANNED',
+      reason: access.reason || '未提供封禁原因',
+      bannedAt: access.bannedAt
+    })
+  }
+  const initialPoints = Number.isSafeInteger(settings.initialPoints)
+    ? settings.initialPoints
+    : Number(env.DEFAULT_INITIAL_POINTS || 1)
+  if (!Number.isSafeInteger(initialPoints) || initialPoints < 0) {
+    throw new ResponseError('初始积分配置不正确', 500)
+  }
   const user: DnsUser = {
     uid: mailUser.uid,
     email: mailUser.email,
     name: mailUser.name,
     points: initialPoints,
     initialGrantDone: true,
+    banned: access?.banned,
+    bannedReason: access?.reason,
+    bannedAt: access?.bannedAt,
+    bannedByUid: access?.bannedByUid,
+    bannedByEmail: access?.bannedByEmail,
     createdAt: now,
     lastSeenAt: now
   }
+  const initialization = await env.USER_POINTS.getByName(user.uid).initializeUser(user.uid, user.points)
+  if (!initialization.ok) throw new ResponseError(initialization.message, 500)
   await putUser(env, user)
   if (initialPoints > 0) {
     await putPointLog(env, {
@@ -110,13 +143,16 @@ export const requireUser = async (request: Request, env: Env) => {
 }
 
 export const requireAdmin = async (request: Request, env: Env) => {
-  const ctx = await requireUser(request, env)
+  const mailUser = await getCurrentMailUser(request, env)
   const admins = env.DNS_ADMIN_EMAILS
     .split(',')
     .map(item => item.trim().toLowerCase())
     .filter(Boolean)
-  if (!admins.includes(ctx.mailUser.email.toLowerCase())) {
+  if (!admins.includes(mailUser.email.toLowerCase())) {
     throw new ResponseError('无管理员权限', 403)
   }
-  return ctx
+  // DNS service bans deliberately do not revoke administration access.
+  // Keep all durable mirrors synchronized while bypassing only the feature gate.
+  const dnsUser = await ensureDnsUser(env, mailUser, false)
+  return { mailUser, dnsUser }
 }

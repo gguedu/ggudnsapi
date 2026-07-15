@@ -8,6 +8,11 @@ import type {
   DnsRecord,
   AdminLoginResponse,
   AuthMe,
+  BanEvent,
+  BanReasonPreset,
+  Paginated,
+  RedemptionCode,
+  RedemptionUse,
 } from '../types'
 
 // ---- 鉴权 ----
@@ -33,21 +38,80 @@ export function addUser(data: { email: string; uid?: string; name?: string; poin
 }
 
 export function adjustPoints(uid: string, delta: number, message?: string) {
-  return api<DnsUser>(`/api/admin/users/${encodeURIComponent(uid)}/points`, {
+  return api<{ user: DnsUser }>(`/api/admin/users/${encodeURIComponent(uid)}/points`, {
     method: 'PATCH',
-    body: JSON.stringify({ delta, message: message || '后台手动调整' }),
+    body: JSON.stringify({ delta, message: message || '后台手动调整', operationId: crypto.randomUUID() }),
   })
 }
 
-export function banUser(uid: string, banned: boolean, reason?: string) {
-  return api<DnsUser>(`/api/admin/users/${encodeURIComponent(uid)}/ban`, {
+export function banUser(uid: string, banned: boolean, reason?: string, presetId?: string) {
+  return api<{ user: DnsUser; event: BanEvent }>(`/api/admin/users/${encodeURIComponent(uid)}/ban`, {
     method: 'PATCH',
-    body: JSON.stringify({ banned, reason: reason || '后台封禁' }),
+    body: JSON.stringify({ banned, reason, presetId, operationId: crypto.randomUUID() }),
   })
+}
+
+export function getUserBanEvents(uid: string) {
+  return api<BanEvent[]>(`/api/admin/users/${encodeURIComponent(uid)}/ban-events`)
 }
 
 export function deleteUser(uid: string) {
   return api<void>(`/api/admin/users/${encodeURIComponent(uid)}`, { method: 'DELETE' })
+}
+
+// ---- 封禁理由预设 ----
+export function getBanReasonPresets() {
+  return api<BanReasonPreset[]>('/api/admin/ban-reason-presets')
+}
+
+export function addBanReasonPreset(reason: string) {
+  return api<BanReasonPreset>('/api/admin/ban-reason-presets', {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })
+}
+
+export function updateBanReasonPreset(id: string, data: Partial<Pick<BanReasonPreset, 'reason' | 'active'>>) {
+  return api<BanReasonPreset>(`/api/admin/ban-reason-presets/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  })
+}
+
+export function disableBanReasonPreset(id: string) {
+  return api<BanReasonPreset>(`/api/admin/ban-reason-presets/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+// ---- 兑换码 ----
+export function getRedemptionCodes() {
+  return api<RedemptionCode[]>('/api/admin/redemption-codes')
+}
+
+export function createRedemptionCode(data: {
+  label?: string
+  mode: 'generated' | 'custom'
+  code?: string
+  points: number
+  maxUses: number
+  expiresAt?: string
+}) {
+  return api<{ code: RedemptionCode; plainCode: string }>('/api/admin/redemption-codes', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+}
+
+export function setRedemptionCodeActive(id: string, active: boolean) {
+  return api<RedemptionCode>(`/api/admin/redemption-codes/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ active }),
+  })
+}
+
+export function getRedemptionCodeUses(id: string, page = 1, pageSize = 50) {
+  return api<Paginated<RedemptionUse>>(
+    `/api/admin/redemption-codes/${encodeURIComponent(id)}/uses?page=${page}&pageSize=${pageSize}`,
+  )
 }
 
 // ---- CF 账户 ----

@@ -1,8 +1,14 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { motion } from 'motion/react'
-import { getUsers, getAccounts, getDomains, getBlacklist, getSettings, getRecords, getMe } from '@/api/admin'
+import {
+  getUsers, getAccounts, getDomains, getBlacklist, getSettings, getRecords, getMe,
+  getBanReasonPresets, getRedemptionCodes,
+} from '@/api/admin'
 import { clearToken, ApiError } from '@/api/client'
-import type { DnsUser, CfAccount, ManagedDomain, BlacklistRule, GlobalSettings, DnsRecord, AuthMe } from '@/types'
+import type {
+  DnsUser, CfAccount, ManagedDomain, BlacklistRule, GlobalSettings, DnsRecord, AuthMe,
+  BanReasonPreset, RedemptionCode,
+} from '@/types'
 import Login from '@/components/Login'
 import Layout from '@/components/Layout'
 import UsersPage from '@/pages/Users'
@@ -11,9 +17,10 @@ import DomainsPage from '@/pages/Domains'
 import BlacklistPage from '@/pages/Blacklist'
 import SettingsPage from '@/pages/Settings'
 import RecordsPage from '@/pages/Records'
+import RedemptionCodesPage from '@/pages/RedemptionCodes'
 import { toast } from 'sonner'
 
-type Tab = 'users' | 'accounts' | 'domains' | 'blacklist' | 'settings' | 'records'
+type Tab = 'users' | 'redemption' | 'accounts' | 'domains' | 'blacklist' | 'settings' | 'records'
 
 interface Cache {
   users: DnsUser[]
@@ -22,6 +29,8 @@ interface Cache {
   blacklist: BlacklistRule[]
   settings: GlobalSettings | null
   records: DnsRecord[]
+  banReasonPresets: BanReasonPreset[]
+  redemptionCodes: RedemptionCode[]
 }
 
 export default function App() {
@@ -30,6 +39,7 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState<Tab>('users')
   const [loading, setLoading] = useState(false)
   const restoredRef = useRef(false)
+  const loadGenerationRef = useRef(0)
 
   const [cache, setCache] = useState<Cache>({
     users: [],
@@ -38,24 +48,42 @@ export default function App() {
     blacklist: [],
     settings: null,
     records: [],
+    banReasonPresets: [],
+    redemptionCodes: [],
   })
 
   const loadAll = useCallback(async () => {
+    const generation = ++loadGenerationRef.current
     setLoading(true)
+    const requests = [
+      getUsers(), getAccounts(), getDomains(), getBlacklist(), getSettings(), getRecords(),
+      getBanReasonPresets(), getRedemptionCodes(),
+    ] as const
     try {
-      const [users, accounts, domains, blacklist, settings, records] = await Promise.all([
-        getUsers(), getAccounts(), getDomains(), getBlacklist(), getSettings(), getRecords(),
-      ])
-      setCache({ users, accounts, domains, blacklist, settings, records })
-    } catch (e) {
-      const msg = e instanceof ApiError ? e.message : '数据加载失败'
-      toast.error(msg)
-      if (e instanceof ApiError && e.status === 401) {
+      const results = await Promise.allSettled(requests)
+      if (generation !== loadGenerationRef.current) return
+      const authError = results.find(
+        result => result.status === 'rejected' && result.reason instanceof ApiError && result.reason.status === 401,
+      )
+      if (authError?.status === 'rejected') {
         clearToken()
         setAuthed(false)
+        return
       }
+      setCache(previous => ({
+        users: results[0].status === 'fulfilled' ? results[0].value : previous.users,
+        accounts: results[1].status === 'fulfilled' ? results[1].value : previous.accounts,
+        domains: results[2].status === 'fulfilled' ? results[2].value : previous.domains,
+        blacklist: results[3].status === 'fulfilled' ? results[3].value : previous.blacklist,
+        settings: results[4].status === 'fulfilled' ? results[4].value : previous.settings,
+        records: results[5].status === 'fulfilled' ? results[5].value : previous.records,
+        banReasonPresets: results[6].status === 'fulfilled' ? results[6].value : previous.banReasonPresets,
+        redemptionCodes: results[7].status === 'fulfilled' ? results[7].value : previous.redemptionCodes,
+      }))
+      const failed = results.filter(result => result.status === 'rejected')
+      if (failed.length) toast.error(`${failed.length} 个数据集加载失败，已保留其他可用数据`)
     } finally {
-      setLoading(false)
+      if (generation === loadGenerationRef.current) setLoading(false)
     }
   }, [])
 
@@ -64,7 +92,10 @@ export default function App() {
     clearToken()
     setAuthed(false)
     setCurrentTab('users')
-    setCache({ users: [], accounts: [], domains: [], blacklist: [], settings: null, records: [] })
+    setCache({
+      users: [], accounts: [], domains: [], blacklist: [], settings: null, records: [],
+      banReasonPresets: [], redemptionCodes: [],
+    })
   }, [])
 
   // 应用启动时恢复会话（仅一次）
@@ -112,7 +143,8 @@ export default function App() {
 
   const renderPage = () => {
     switch (currentTab) {
-      case 'users': return <UsersPage users={cache.users} onRefresh={loadAll} />
+      case 'users': return <UsersPage users={cache.users} presets={cache.banReasonPresets} onRefresh={loadAll} />
+      case 'redemption': return <RedemptionCodesPage codes={cache.redemptionCodes} onRefresh={loadAll} />
       case 'accounts': return <AccountsPage accounts={cache.accounts} onRefresh={loadAll} />
       case 'domains': return <DomainsPage domains={cache.domains} accounts={cache.accounts} onRefresh={loadAll} />
       case 'blacklist': return <BlacklistPage blacklist={cache.blacklist} onRefresh={loadAll} />

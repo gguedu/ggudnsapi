@@ -5,7 +5,65 @@ export interface DnsUser {
   name: string
   points: number
   banned: boolean
+  bannedReason?: string
+  bannedAt?: string
+  bannedByUid?: string
+  bannedByEmail?: string
   recordCount: number
+}
+
+export interface BanReasonPreset {
+  id: string
+  reason: string
+  active: boolean
+  createdAt: string
+  updatedAt: string
+  createdByUid: string
+  createdByEmail: string
+}
+
+export interface BanEvent {
+  id: string
+  uid: string
+  action: 'ban' | 'unban'
+  reason?: string
+  presetId?: string
+  actorUid: string
+  actorEmail: string
+  createdAt: string
+}
+
+export interface RedemptionCode {
+  id: string
+  label: string
+  maskedCode: string
+  points: number
+  maxUses: number
+  useCount: number
+  active: boolean
+  expiresAt?: string
+  createdAt: string
+  createdByUid: string
+  createdByEmail: string
+}
+
+export interface RedemptionUse {
+  id: string
+  codeId: string
+  codeLabel: string
+  uid: string
+  email: string
+  points: number
+  redeemedAt: string
+  pointLogId?: string
+  status: 'pending' | 'completed'
+}
+
+export interface Paginated<T> {
+  items: T[]
+  total: number
+  page: number
+  pageSize: number
 }
 
 // ---- Cloudflare 账户 ----

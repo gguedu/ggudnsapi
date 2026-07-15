@@ -1,7 +1,9 @@
 import { useState, useMemo } from 'react'
-import { addUser, adjustPoints, banUser, deleteUser } from '@/api/admin'
+import {
+  addBanReasonPreset, addUser, adjustPoints, banUser, deleteUser, disableBanReasonPreset,
+} from '@/api/admin'
 import { ApiError } from '@/api/client'
-import type { DnsUser } from '@/types'
+import type { BanReasonPreset, DnsUser } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Button } from '@/components/ui/button'
@@ -19,15 +21,16 @@ import { PageHeader, StatCard, EmptyState, StaggerGroup } from '@/components/Pag
 import { toast } from 'sonner'
 import {
   Loader2, Plus, Search, MoreHorizontal, Coins, Ban, Trash2, UserCheck,
-  Users as UsersIcon, ShieldOff, FileText,
+  Users as UsersIcon, ShieldOff, FileText, X,
 } from 'lucide-react'
 
 interface Props {
   users: DnsUser[]
+  presets: BanReasonPreset[]
   onRefresh: () => void
 }
 
-export default function UsersPage({ users, onRefresh }: Props) {
+export default function UsersPage({ users, presets, onRefresh }: Props) {
   const [query, setQuery] = useState('')
   const [addOpen, setAddOpen] = useState(false)
   const [actioning, setActioning] = useState(false)
@@ -42,6 +45,9 @@ export default function UsersPage({ users, onRefresh }: Props) {
   const [dialog, setDialog] = useState<{ type: 'points' | 'ban' | 'delete'; uid: string } | null>(null)
   const [pointsDelta, setPointsDelta] = useState('')
   const [banReason, setBanReason] = useState('')
+  const [selectedPresetId, setSelectedPresetId] = useState('')
+  const [newPreset, setNewPreset] = useState('')
+  const [presetActioning, setPresetActioning] = useState(false)
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -90,10 +96,10 @@ export default function UsersPage({ users, onRefresh }: Props) {
       } else if (dialog.type === 'ban') {
         const user = users.find(u => u.uid === dialog.uid)
         if (user?.banned) {
-          await banUser(dialog.uid, false)
+          await banUser(dialog.uid, false, '管理员解除封禁')
           toast.success('用户已解封')
         } else {
-          await banUser(dialog.uid, true, banReason || '后台封禁')
+          await banUser(dialog.uid, true, banReason || undefined, selectedPresetId || undefined)
           toast.success('用户已封禁')
         }
       } else {
@@ -109,10 +115,35 @@ export default function UsersPage({ users, onRefresh }: Props) {
   const openDialog = (type: 'points' | 'ban' | 'delete', uid: string) => {
     setPointsDelta('')
     setBanReason('')
+    setSelectedPresetId('')
     setDialog({ type, uid })
   }
 
   const targetUser = dialog ? users.find(u => u.uid === dialog.uid) : null
+
+  const handleAddPreset = async () => {
+    if (!newPreset.trim()) return
+    setPresetActioning(true)
+    try {
+      const preset = await addBanReasonPreset(newPreset.trim())
+      setSelectedPresetId(preset.id)
+      setNewPreset('')
+      toast.success('封禁理由预设已添加')
+      onRefresh()
+    } catch (e) { toast.error(e instanceof ApiError ? e.message : '添加预设失败') }
+    finally { setPresetActioning(false) }
+  }
+
+  const handleDisablePreset = async (id: string) => {
+    setPresetActioning(true)
+    try {
+      await disableBanReasonPreset(id)
+      if (selectedPresetId === id) setSelectedPresetId('')
+      toast.success('预设已停用')
+      onRefresh()
+    } catch (e) { toast.error(e instanceof ApiError ? e.message : '停用预设失败') }
+    finally { setPresetActioning(false) }
+  }
 
   return (
     <>
@@ -174,7 +205,11 @@ export default function UsersPage({ users, onRefresh }: Props) {
                   <TableCell className="text-right tabular-nums font-medium">{user.points}</TableCell>
                   <TableCell>
                     {user.banned ? (
-                      <Badge variant="destructive">已封禁</Badge>
+                      <div>
+                        <Badge variant="destructive">已封禁</Badge>
+                        {user.bannedReason && <p className="mt-1 max-w-44 truncate text-[11px] text-destructive" title={user.bannedReason}>{user.bannedReason}</p>}
+                        {user.bannedAt && <p className="mt-0.5 text-[10px] text-muted-foreground">{new Date(user.bannedAt).toLocaleString('zh-CN')}</p>}
+                      </div>
                     ) : (
                       <Badge variant="secondary" className="bg-success/10 text-success">正常</Badge>
                     )}
@@ -270,7 +305,7 @@ export default function UsersPage({ users, onRefresh }: Props) {
               </DialogTitle>
               <DialogDescription>
                 {dialog.type === 'delete' ? '此操作不可撤销。仅可删除没有解析记录的用户。' :
-                 dialog.type === 'ban' ? (targetUser?.banned ? '解封后该用户可恢复使用全部功能。' : '封禁后该用户将无法创建新解析记录。') :
+                 dialog.type === 'ban' ? (targetUser?.banned ? '解封后该用户可恢复使用 DNS 用户功能，历史操作仍会保留。' : '封禁后用户仍可登录通行证，但无法使用 DNS 记录、积分与兑换功能。') :
                  '输入积分增减量，正数增加，负数扣减。'}
               </DialogDescription>
             </DialogHeader>
@@ -292,9 +327,38 @@ export default function UsersPage({ users, onRefresh }: Props) {
               </div>
             )}
             {dialog.type === 'ban' && !targetUser?.banned && (
-              <div className="space-y-1.5">
-                <Label className="text-xs">封禁原因（可选）</Label>
-                <Input value={banReason} onChange={e => setBanReason(e.target.value)} placeholder="将记录到用户日志" autoFocus />
+              <div className="space-y-4">
+                <div className="space-y-1.5">
+                  <Label className="text-xs">理由预设</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {presets.filter(item => item.active).map(preset => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => { setSelectedPresetId(preset.id); setBanReason('') }}
+                        className={`group inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${selectedPresetId === preset.id ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-muted/40 text-muted-foreground hover:text-foreground'}`}
+                      >
+                        {preset.reason}
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          className="ml-0.5 opacity-45 hover:opacity-100"
+                          onClick={event => { event.stopPropagation(); handleDisablePreset(preset.id) }}
+                          onKeyDown={event => { if (event.key === 'Enter') handleDisablePreset(preset.id) }}
+                        ><X className="size-3" /></span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex gap-2">
+                    <Input value={newPreset} onChange={e => setNewPreset(e.target.value)} placeholder="添加常用封禁理由" />
+                    <Button variant="outline" onClick={handleAddPreset} disabled={presetActioning || !newPreset.trim()}>添加</Button>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">自定义理由</Label>
+                  <Input value={banReason} onChange={e => { setBanReason(e.target.value); if (e.target.value) setSelectedPresetId('') }} placeholder="也可以手动填写具体原因" autoFocus />
+                  <p className="text-[11px] text-muted-foreground">理由会连同封禁时间展示给用户。</p>
+                </div>
               </div>
             )}
             <DialogFooter>
@@ -302,7 +366,7 @@ export default function UsersPage({ users, onRefresh }: Props) {
               <Button
                 variant={dialog.type === 'points' ? 'default' : 'destructive'}
                 onClick={handleAction}
-                disabled={actioning}
+                disabled={actioning || (dialog.type === 'ban' && !targetUser?.banned && !banReason.trim() && !selectedPresetId)}
               >
                 {actioning && <Loader2 className="size-3.5 animate-spin" />}
                 确认
