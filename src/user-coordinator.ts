@@ -12,6 +12,7 @@ import {
 } from './kv'
 import { adjustPoints } from './points'
 import {
+  hasCoordinatedRecord,
   requestDomainCoordinator,
   type DomainCoordinatorAction
 } from './domain-coordinator-client'
@@ -46,9 +47,23 @@ export class UserCoordinator extends DurableObject<Env> {
           value TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS records (
-          id TEXT PRIMARY KEY
+          id TEXT PRIMARY KEY,
+          root TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('pending-create', 'active', 'pending-delete'))
         );
       `)
+      const columns = this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(records)').toArray()
+      if (!columns.some(column => column.name === 'root')) {
+        this.ctx.storage.sql.exec(`
+          ALTER TABLE records RENAME TO records_legacy;
+          CREATE TABLE records (
+            id TEXT PRIMARY KEY,
+            root TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('pending-create', 'active', 'pending-delete'))
+          );
+          DROP TABLE records_legacy;
+        `)
+      }
     })
   }
 
@@ -94,9 +109,27 @@ export class UserCoordinator extends DurableObject<Env> {
 
     const records = (await listRecords(this.env)).filter(record => record.uid === uid)
     for (const record of records) {
-      this.ctx.storage.sql.exec('INSERT OR IGNORE INTO records (id) VALUES (?)', record.id)
+      this.ctx.storage.sql.exec(
+        "INSERT OR IGNORE INTO records (id, root, state) VALUES (?, ?, 'active')",
+        record.id,
+        record.root
+      )
     }
     this.ctx.storage.sql.exec("INSERT INTO meta (key, value) VALUES ('uid', ?)", uid)
+  }
+
+  private async reconcileRecords(uid: string) {
+    const rows = this.ctx.storage.sql
+      .exec<{ id: string; root: string; state: string }>('SELECT id, root, state FROM records')
+      .toArray()
+    for (const row of rows) {
+      const exists = await hasCoordinatedRecord(this.env, row.root, row.id, uid)
+      if (exists) {
+        this.ctx.storage.sql.exec("UPDATE records SET state = 'active' WHERE id = ?", row.id)
+      } else if (row.state !== 'pending-create') {
+        this.ctx.storage.sql.exec('DELETE FROM records WHERE id = ?', row.id)
+      }
+    }
   }
 
   private recordCount() {
@@ -278,6 +311,7 @@ export class UserCoordinator extends DurableObject<Env> {
 
   private async deleteUser(uid: string) {
     const user = await this.currentUser(uid)
+    await this.reconcileRecords(uid)
     if (this.recordCount() > 0) {
       throw new ResponseError('该用户仍有解析记录，请先删除解析或封禁用户', 400)
     }
@@ -288,24 +322,65 @@ export class UserCoordinator extends DurableObject<Env> {
   private async mutateRecord(uid: string, action: DomainCoordinatorAction, payload: RecordPayload) {
     const user = await this.currentUser(uid)
     if (user.banned) throw new ResponseError(user.bannedReason || '用户已被封禁', 403)
-    const result = await requestDomainCoordinator<DnsRecord | { record: DnsRecord; user: DnsUser }>(
-      this.env,
-      payload.root,
-      action,
-      {
-        user,
-        settings: payload.settings,
-        id: payload.id,
-        body: payload.body,
-        clientIp: payload.clientIp
-      }
-    )
-    const record = 'record' in result ? result.record : result
+
+    const operationId = action === 'create-record'
+      ? typeof payload.body?.operationId === 'string' && payload.body.operationId.trim()
+        ? payload.body.operationId.trim()
+        : randomId()
+      : payload.id
+    if (!operationId) throw new ResponseError('记录操作标识不能为空', 400)
     if (action === 'create-record') {
-      this.ctx.storage.sql.exec('INSERT OR IGNORE INTO records (id) VALUES (?)', record.id)
+      payload.body = { ...payload.body, operationId }
+      this.ctx.storage.sql.exec(
+        "INSERT INTO records (id, root, state) VALUES (?, ?, 'pending-create') ON CONFLICT(id) DO UPDATE SET root = excluded.root",
+        operationId,
+        payload.root
+      )
     } else if (action === 'delete-record') {
-      this.ctx.storage.sql.exec('DELETE FROM records WHERE id = ?', record.id)
+      this.ctx.storage.sql.exec(
+        "INSERT INTO records (id, root, state) VALUES (?, ?, 'pending-delete') ON CONFLICT(id) DO UPDATE SET root = excluded.root, state = 'pending-delete'",
+        operationId,
+        payload.root
+      )
     }
-    return result
+
+    try {
+      const result = await requestDomainCoordinator<DnsRecord | { record: DnsRecord; user: DnsUser }>(
+        this.env,
+        payload.root,
+        action,
+        {
+          user,
+          settings: payload.settings,
+          id: payload.id,
+          body: payload.body,
+          clientIp: payload.clientIp
+        }
+      )
+      const record = 'record' in result ? result.record : result
+      if (action === 'create-record') {
+        this.ctx.storage.sql.exec("UPDATE records SET state = 'active' WHERE id = ?", record.id)
+      } else if (action === 'delete-record') {
+        this.ctx.storage.sql.exec('DELETE FROM records WHERE id = ?', record.id)
+      }
+      return result
+    } catch (error) {
+      if (action === 'create-record') {
+        const exists = await hasCoordinatedRecord(this.env, payload.root, operationId, uid).catch(() => null)
+        if (exists === true) {
+          this.ctx.storage.sql.exec("UPDATE records SET state = 'active' WHERE id = ?", operationId)
+        } else if (exists === false) {
+          this.ctx.storage.sql.exec('DELETE FROM records WHERE id = ?', operationId)
+        }
+      } else if (action === 'delete-record') {
+        const exists = await hasCoordinatedRecord(this.env, payload.root, operationId, uid).catch(() => null)
+        if (exists === false) {
+          this.ctx.storage.sql.exec('DELETE FROM records WHERE id = ?', operationId)
+        } else if (exists === true) {
+          this.ctx.storage.sql.exec("UPDATE records SET state = 'active' WHERE id = ?", operationId)
+        }
+      }
+      throw error
+    }
   }
 }

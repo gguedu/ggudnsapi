@@ -15,7 +15,7 @@ import { createUserRecord, deleteUserRecord, refundDeletedRecord, toggleUserReco
 import { getSecondLevel } from './domain'
 
 interface CoordinatorRequest {
-  action: 'get-domain' | 'put-domain' | 'delete-domain' | 'create-record' | 'update-record' | 'toggle-record' | 'delete-record'
+  action: 'get-domain' | 'put-domain' | 'delete-domain' | 'has-record' | 'create-record' | 'update-record' | 'toggle-record' | 'delete-record'
   root: string
   payload: unknown
 }
@@ -184,6 +184,13 @@ export class DomainCoordinator extends DurableObject<Env> {
     if (input.action === 'get-domain') return this.getMeta()?.domain || null
     if (input.action === 'put-domain') return this.putDomain(input.payload as PutDomainPayload)
     if (input.action === 'delete-domain') return this.deleteDomain()
+    if (input.action === 'has-record') {
+      const payload = input.payload as { id: string; uid: string }
+      const record = this.ctx.storage.sql
+        .exec<{ value: string }>('SELECT value FROM records WHERE id = ?', payload.id)
+        .toArray()[0]
+      return record ? (JSON.parse(record.value) as DnsRecord).uid === payload.uid : false
+    }
     if (input.action === 'create-record') return this.createRecord(input.payload as CreateRecordPayload)
     if (input.action === 'update-record') return this.updateRecord(input.payload as RecordMutationPayload)
     if (input.action === 'toggle-record') return this.toggleRecord(input.payload as RecordMutationPayload)

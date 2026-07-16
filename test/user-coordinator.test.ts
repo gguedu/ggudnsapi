@@ -83,6 +83,44 @@ describe('UserCoordinator', () => {
     expect(logs.filter(log => log.reason === 'create_record')).toHaveLength(1)
   })
 
+  it('keeps retryable record identity stable across the user and domain coordinators', async () => {
+    const stub = env.USER_COORDINATOR.getByName(uid)
+    const operationId = 'stable-create-operation'
+    const payload = {
+      root: roots[0],
+      settings,
+      body: {
+        operationId,
+        fullDomain: `stable.${roots[0]}`,
+        type: 'A',
+        content: '192.0.2.20',
+        ttl: 600
+      },
+      clientIp: ''
+    }
+
+    const first = await requestUserCoordinator<{ record: { id: string }; user: DnsUser }>(
+      env,
+      uid,
+      'create-record',
+      payload,
+      stub
+    )
+    const replay = await requestUserCoordinator<{ record: { id: string }; user: DnsUser }>(
+      env,
+      uid,
+      'create-record',
+      payload,
+      stub
+    )
+
+    expect(first.record.id).toBe(operationId)
+    expect(replay.record.id).toBe(operationId)
+    expect((await getUser(env, uid))?.points).toBe(0)
+    const logs = await listUserPointLogs(env, uid)
+    expect(logs.filter(log => log.reason === 'create_record')).toHaveLength(1)
+  })
+
   it('blocks user deletion after a coordinated record create', async () => {
     const stub = env.USER_COORDINATOR.getByName(uid)
     await requestUserCoordinator(env, uid, 'create-record', {

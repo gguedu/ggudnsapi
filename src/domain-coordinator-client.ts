@@ -5,6 +5,7 @@ export type DomainCoordinatorAction =
   | 'get-domain'
   | 'put-domain'
   | 'delete-domain'
+  | 'has-record'
   | 'create-record'
   | 'update-record'
   | 'toggle-record'
@@ -51,6 +52,9 @@ export const putCoordinatedDomain = (env: Env, domain: ManagedDomain, mode: 'cre
 
 export const deleteCoordinatedDomain = (env: Env, root: string) =>
   requestCoordinator<ManagedDomain | { root: string }>(env, root, 'delete-domain', null)
+
+export const hasCoordinatedRecord = (env: Env, root: string, id: string, uid: string) =>
+  requestCoordinator<boolean>(env, root, 'has-record', { id, uid })
 
 export const createCoordinatedRecord = (
   env: Env,
