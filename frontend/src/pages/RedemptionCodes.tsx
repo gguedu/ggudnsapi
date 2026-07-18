@@ -119,7 +119,7 @@ export default function RedemptionCodesPage({ codes, onRefresh }: Props) {
         <StatCard label="总容量" value={stats.capacity} icon={<Gift className="size-4.5" />} />
       </StaggerGroup>
 
-      <Card className="overflow-hidden border-primary/15">
+      <Card className="gap-0 overflow-hidden border-primary/15 py-0">
         <div className="grid lg:grid-cols-[0.72fr_1.28fr]">
           <div className="relative overflow-hidden border-b border-border bg-primary p-6 text-primary-foreground lg:border-b-0 lg:border-r lg:p-8">
             <div className="absolute -right-16 -top-20 size-56 rounded-full border-[34px] border-white/8" />
