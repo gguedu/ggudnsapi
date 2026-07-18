@@ -10,7 +10,8 @@ import {
   putPointLog,
   putUser
 } from './kv'
-import { adjustPoints } from './points'
+import { adjustPoints, redeemPoints } from './points'
+import { assertDnsServiceAllowed, readDnsUserSnapshot } from './user-state'
 import {
   hasCoordinatedRecord,
   requestDomainCoordinator,
@@ -27,6 +28,7 @@ interface UserCoordinatorRequest {
 interface RecordPayload {
   root: string
   settings: Settings
+  mailUser?: Pick<MailUserInfo, 'uid' | 'email' | 'name'>
   id?: string
   body?: Record<string, unknown>
   clientIp?: string
@@ -36,8 +38,6 @@ const json = (body: unknown, status = 200) =>
   Response.json(body, { status, headers: { 'content-type': 'application/json; charset=utf-8' } })
 
 export class UserCoordinator extends DurableObject<Env> {
-  private tail: Promise<void> = Promise.resolve()
-
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
     ctx.blockConcurrencyWhile(async () => {
@@ -77,9 +77,10 @@ export class UserCoordinator extends DurableObject<Env> {
       return json({ success: false, message: '请求体格式不正确', status: 400 }, 400)
     }
 
-    return this.enqueue(async () => {
+    return this.ctx.blockConcurrencyWhile(async () => {
       try {
-        await this.ensureInitialized(input.uid)
+        this.ensureIdentity(input.uid)
+        if (input.action === 'delete-user') await this.ensureRecordRegistry(input.uid)
         const data = await this.dispatch(input)
         return json({ success: true, data })
       } catch (error) {
@@ -91,21 +92,20 @@ export class UserCoordinator extends DurableObject<Env> {
     })
   }
 
-  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(operation, operation)
-    this.tail = result.then(
-      () => undefined,
-      () => undefined
-    )
-    return result
-  }
-
-  private async ensureInitialized(uid: string) {
+  private ensureIdentity(uid: string) {
     const initialized = this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'uid'").toArray()[0]
     if (initialized) {
       if (initialized.value !== uid) throw new ResponseError('用户协调器标识不一致', 500)
       return
     }
+    this.ctx.storage.sql.exec("INSERT INTO meta (key, value) VALUES ('uid', ?)", uid)
+  }
+
+  private async ensureRecordRegistry(uid: string) {
+    const initialized = this.ctx.storage.sql
+      .exec<{ value: string }>("SELECT value FROM meta WHERE key = 'records-initialized'")
+      .toArray()[0]
+    if (initialized) return
 
     const records = (await listRecords(this.env)).filter(record => record.uid === uid)
     for (const record of records) {
@@ -115,7 +115,7 @@ export class UserCoordinator extends DurableObject<Env> {
         record.root
       )
     }
-    this.ctx.storage.sql.exec("INSERT INTO meta (key, value) VALUES ('uid', ?)", uid)
+    this.ctx.storage.sql.exec("INSERT INTO meta (key, value) VALUES ('records-initialized', 'true')")
   }
 
   private async reconcileRecords(uid: string) {
@@ -137,26 +137,17 @@ export class UserCoordinator extends DurableObject<Env> {
   }
 
   private async currentUser(uid: string) {
-    const user = await getUser(this.env, uid)
-    if (!user) throw new ResponseError('用户不存在', 404)
-    const [balance, access] = await Promise.all([
-      this.env.USER_POINTS.getByName(uid).getBalance(user.points),
-      this.env.USER_ACCESS.getByName(uid).getState()
-    ])
-    return {
-      ...user,
-      points: balance ?? user.points,
-      banned: access?.banned ?? user.banned,
-      bannedReason: access ? access.reason : user.bannedReason,
-      bannedAt: access ? access.bannedAt : user.bannedAt,
-      bannedByUid: access ? access.bannedByUid : user.bannedByUid,
-      bannedByEmail: access ? access.bannedByEmail : user.bannedByEmail
-    }
+    const snapshot = await readDnsUserSnapshot(this.env, uid)
+    if (!snapshot.user) throw new ResponseError('用户不存在', 404)
+    return snapshot.user
   }
 
   private async dispatch(input: UserCoordinatorRequest) {
     if (input.action === 'ensure-user') {
-      return this.ensureUser(input.uid, input.payload as { mailUser: MailUserInfo; enforceBan?: boolean })
+      return this.ensureUser(
+        input.uid,
+        input.payload as { mailUser: Pick<MailUserInfo, 'uid' | 'email' | 'name'>; enforceBan?: boolean }
+      )
     }
     if (input.action === 'create-user') return this.createUser(input.uid, input.payload as { user: DnsUser })
     if (input.action === 'adjust-points') {
@@ -178,6 +169,16 @@ export class UserCoordinator extends DurableObject<Env> {
         }
       )
     }
+    if (input.action === 'redeem-code') {
+      return this.redeemCode(
+        input.uid,
+        input.payload as {
+          objectName: string
+          secretHash: string
+          mailUser: Pick<MailUserInfo, 'uid' | 'email' | 'name'>
+        }
+      )
+    }
     if (input.action === 'delete-user') return this.deleteUser(input.uid)
     if (input.action === 'create-record') return this.mutateRecord(input.uid, 'create-record', input.payload as RecordPayload)
     if (input.action === 'update-record') return this.mutateRecord(input.uid, 'update-record', input.payload as RecordPayload)
@@ -186,7 +187,8 @@ export class UserCoordinator extends DurableObject<Env> {
     throw new ResponseError('接口不存在', 404)
   }
 
-  private async ensureUser(uid: string, payload: { mailUser: MailUserInfo; enforceBan?: boolean }) {
+  private async ensureUser(uid: string, payload: { mailUser: Pick<MailUserInfo, 'uid' | 'email' | 'name'>; enforceBan?: boolean }) {
+    if (payload.mailUser.uid !== uid) throw new ResponseError('用户标识不一致', 400)
     const existing = await getUser(this.env, uid)
     const access = await this.env.USER_ACCESS.getByName(uid).getState()
     const now = nowIso()
@@ -309,6 +311,60 @@ export class UserCoordinator extends DurableObject<Env> {
     return { user: next, event: result.event as BanEvent }
   }
 
+  private async redeemCode(
+    uid: string,
+    payload: {
+      objectName: string
+      secretHash: string
+      mailUser: Pick<MailUserInfo, 'uid' | 'email' | 'name'>
+    }
+  ) {
+    const user = await this.ensureUser(uid, { mailUser: payload.mailUser })
+    assertDnsServiceAllowed({ user, access: null })
+
+    if (!payload.objectName) throw new ResponseError('兑换码无效', 404)
+    const stub = this.env.REDEMPTION_CODES.getByName(payload.objectName)
+    const code = await stub.getCode()
+    if (!code || code.secretHash !== payload.secretHash) throw new ResponseError('兑换码无效', 404)
+
+    const prior = await stub.getUse(uid)
+    if (prior?.status === 'pending') {
+      const priorLog = await this.env.USER_POINTS.getByName(uid).getOperation(`redemption:${prior.id}`)
+      if (priorLog) {
+        const use = await stub.complete(prior.id, priorLog.id)
+        throw new ResponseError('你已经使用过这个兑换码', 409, {
+          code: 'REDEMPTION_ALREADY_COMPLETED',
+          use
+        })
+      }
+    }
+
+    const reservation = await stub.reserve(uid, user.email)
+    if (!reservation.ok || !reservation.use) {
+      const message = reservation.reason === 'already_redeemed'
+        ? '你已经使用过这个兑换码'
+        : reservation.reason === 'inactive'
+          ? '该兑换码已停用'
+          : reservation.reason === 'expired'
+            ? '该兑换码已过期'
+            : reservation.reason === 'exhausted'
+              ? '该兑换码已达到使用次数上限'
+              : '兑换码无效'
+      throw new ResponseError(message, 409)
+    }
+
+    try {
+      const result = await redeemPoints(this.env, user, reservation.use.points, code.id, reservation.use.id)
+      const use = await stub.complete(reservation.use.id, result.log.id)
+      if (!use) throw new ResponseError('兑换记录完成失败', 500)
+      return { user: result.user, log: result.log, use }
+    } catch (error) {
+      const committed = await this.env.USER_POINTS.getByName(uid).getOperation(`redemption:${reservation.use.id}`)
+      if (!committed) await stub.cancel(reservation.use.id)
+      throw error
+    }
+  }
+
   private async deleteUser(uid: string) {
     const user = await this.currentUser(uid)
     await this.reconcileRecords(uid)
@@ -320,8 +376,14 @@ export class UserCoordinator extends DurableObject<Env> {
   }
 
   private async mutateRecord(uid: string, action: DomainCoordinatorAction, payload: RecordPayload) {
-    const user = await this.currentUser(uid)
-    if (user.banned) throw new ResponseError(user.bannedReason || '用户已被封禁', 403)
+    let user: DnsUser
+    if (action === 'create-record') {
+      if (!payload.mailUser) throw new ResponseError('缺少用户身份信息', 400)
+      user = await this.ensureUser(uid, { mailUser: payload.mailUser })
+    } else {
+      user = await this.currentUser(uid)
+    }
+    assertDnsServiceAllowed({ user, access: null })
 
     const operationId = action === 'create-record'
       ? typeof payload.body?.operationId === 'string' && payload.body.operationId.trim()

@@ -9,9 +9,10 @@ import type {
   ManagedDomain,
   Settings
 } from './types'
-import { getCurrentMailUser, requireAdmin, requireUser } from './auth'
+import { ensureDnsUser, getCurrentMailUser, requireAdmin, requireUserIdentity, requireUserRead } from './auth'
 import { encryptSecret, listCloudflareAccounts, listZones } from './cloudflare'
 import { findManagedDomain, normalizeHostname } from './domain'
+import { assertDnsServiceAllowed, readDnsUserSnapshot } from './user-state'
 import { ResponseError, corsHeaders, fail, nowIso, ok, randomId, readJson } from './http'
 import {
   deleteBlacklist,
@@ -37,7 +38,6 @@ import {
   putRedemptionCodeIndex,
   putSettings
 } from './kv'
-import { redeemPoints } from './points'
 export { DomainCoordinator } from './domain-coordinator'
 export { RedemptionCodeObject } from './redemption'
 export { UserAccessObject } from './user-access'
@@ -59,6 +59,7 @@ import {
   createUserCoordinatedRecord,
   deleteCoordinatedUser,
   deleteUserCoordinatedRecord,
+  redeemCoordinatedCode,
   setCoordinatedBan,
   toggleUserCoordinatedRecord,
   updateUserCoordinatedRecord
@@ -127,14 +128,6 @@ const validateCustomRedemptionCode = (value: string) => {
 const maskRedemptionCode = (value: string) => {
   const compact = value.replace(/-/g, '')
   return `${compact.slice(0, 4)}••••${compact.slice(-4)}`
-}
-
-const redemptionErrorMessage = (reason?: string) => {
-  if (reason === 'already_redeemed') return '你已经使用过这个兑换码'
-  if (reason === 'inactive') return '该兑换码已停用'
-  if (reason === 'expired') return '该兑换码已过期'
-  if (reason === 'exhausted') return '该兑换码已达到使用次数上限'
-  return '兑换码无效'
 }
 
 const redactAccount = (account: CfAccount) => ({
@@ -275,20 +268,19 @@ const handleAuth = async (request: Request, env: Env, segments: string[]) => {
     const token = await loginToMail(env, email, password)
     const mailUser = await getCurrentMailUser(makeAuthRequest(token), env)
     if (!isAdminEmail(env, mailUser.email)) throw new ResponseError('当前账号不是 DNS 管理员', 403)
-    const dnsUser = await requireAdmin(makeAuthRequest(token), env).then(ctx => ctx.dnsUser)
-    return ok({ token, mailUser, user: dnsUser, isAdmin: true })
+    return ok({ token, mailUser, user: null, isAdmin: true })
   }
   if (request.method === 'GET' && segments[2] === 'me') {
     const mailUser = await getCurrentMailUser(request, env)
-    if (isAdminEmail(env, mailUser.email)) {
-      const { dnsUser } = await requireAdmin(request, env)
-      return ok({ mailUser, user: dnsUser, isAdmin: true })
-    }
-    const { dnsUser } = await requireUser(request, env)
-    return ok({ mailUser, user: dnsUser, isAdmin: false })
+    const isAdmin = isAdminEmail(env, mailUser.email)
+    if (isAdmin) return ok({ mailUser, user: null, isAdmin: true })
+    const snapshot = await readDnsUserSnapshot(env, mailUser.uid)
+    assertDnsServiceAllowed(snapshot)
+    return ok({ mailUser, user: snapshot.user, isAdmin: false })
   }
   if (request.method === 'POST' && segments[2] === 'callback') {
-    const { mailUser, dnsUser } = await requireUser(request, env)
+    const mailUser = await getCurrentMailUser(request, env)
+    const dnsUser = await ensureDnsUser(env, mailUser)
     return ok({ mailUser, user: dnsUser, isAdmin: isAdminEmail(env, mailUser.email) })
   }
   throw new ResponseError('接口不存在', 404)
@@ -299,45 +291,49 @@ const handleRecords = async (request: Request, env: Env, segments: string[]) => 
   if (request.method === 'GET' && segments[2] === 'meta') {
     return ok(await recordsMeta(env, settings))
   }
-  const { dnsUser } = await requireUser(request, env)
-  if (request.method === 'GET' && segments.length === 2) return ok(await listUserRecordSummaries(env, dnsUser))
+  if (request.method === 'GET' && segments.length === 2) {
+    const { dnsUser } = await requireUserRead(request, env)
+    return ok(await listUserRecordSummaries(env, dnsUser.uid))
+  }
+
+  const { mailUser } = await requireUserIdentity(request, env)
   if (request.method === 'POST' && segments.length === 2) {
     const body = await requireBody(request)
     const domain = findManagedDomain(String(body.fullDomain || ''), await listDomains(env))
-    return ok(await createUserCoordinatedRecord(env, dnsUser.uid, domain.root, request, settings, body))
+    return ok(await createUserCoordinatedRecord(env, mailUser, domain.root, request, settings, body))
   }
   const id = segments[2]
   if (!id) throw new ResponseError('接口不存在', 404)
   if (request.method === 'PATCH' && segments[3] === 'toggle') {
     const record = await getRecord(env, id)
     if (!record) throw new ResponseError('解析记录不存在', 404)
-    return ok(await toggleUserCoordinatedRecord(env, dnsUser.uid, record.root, settings, id))
+    return ok(await toggleUserCoordinatedRecord(env, mailUser.uid, record.root, settings, id))
   }
   if (request.method === 'PATCH' && segments.length === 3) {
     const record = await getRecord(env, id)
     if (!record) throw new ResponseError('解析记录不存在', 404)
     const body = await requireBody(request)
-    return ok(await updateUserCoordinatedRecord(env, dnsUser.uid, record.root, settings, id, body))
+    return ok(await updateUserCoordinatedRecord(env, mailUser.uid, record.root, settings, id, body))
   }
   if (request.method === 'DELETE' && segments.length === 3) {
     const record = await getRecord(env, id)
     if (!record) throw new ResponseError('解析记录不存在', 404)
-    return ok(await deleteUserCoordinatedRecord(env, dnsUser.uid, record.root, settings, id))
+    return ok(await deleteUserCoordinatedRecord(env, mailUser.uid, record.root, settings, id))
   }
   throw new ResponseError('接口不存在', 404)
 }
 
 const handlePoints = async (request: Request, env: Env, segments: string[]) => {
-  const { dnsUser } = await requireUser(request, env)
   if (request.method === 'GET' && segments.length === 2) {
-    const balance = await env.USER_POINTS.getByName(dnsUser.uid).getBalance(dnsUser.points)
+    const { dnsUser } = await requireUserRead(request, env)
     const durableLogs = await env.USER_POINTS.getByName(dnsUser.uid).listPointLogs()
     const legacyLogs = await listUserPointLogs(env, dnsUser.uid)
     const logs = Array.from(new Map([...durableLogs, ...legacyLogs].map(log => [log.id, log])).values())
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    return ok({ balance: balance ?? dnsUser.points, logs })
+    return ok({ balance: dnsUser.points, logs })
   }
   if (request.method === 'POST' && segments[2] === 'redeem') {
+    const { mailUser } = await requireUserIdentity(request, env)
     const body = await requireBody(request)
     const plainCode = normalizeRedemptionCode(body.code)
     if (!plainCode) throw new ResponseError('请输入兑换码', 400)
@@ -347,33 +343,7 @@ const handlePoints = async (request: Request, env: Env, segments: string[]) => {
     const secretHash = await hashRedemptionCode(plainCode)
     const codeIndex = await getRedemptionCodeIndexByHash(env, secretHash)
     if (!codeIndex) throw new ResponseError('兑换码无效', 404)
-    const stub = env.REDEMPTION_CODES.getByName(codeIndex.objectName)
-    const code = await stub.getCode()
-    if (!code || code.secretHash !== secretHash) throw new ResponseError('兑换码无效', 404)
-    const prior = await stub.getUse(dnsUser.uid)
-    if (prior?.status === 'pending') {
-      const priorLog = await env.USER_POINTS.getByName(dnsUser.uid).getOperation(`redemption:${prior.id}`)
-      if (priorLog) {
-        const completedUse = await stub.complete(prior.id, priorLog.id)
-        throw new ResponseError('你已经使用过这个兑换码', 409, {
-          code: 'REDEMPTION_ALREADY_COMPLETED',
-          use: completedUse
-        })
-      }
-    }
-    const reservation = await stub.reserve(dnsUser.uid, dnsUser.email)
-    if (!reservation.ok || !reservation.use) {
-      throw new ResponseError(redemptionErrorMessage(reservation.reason), 409)
-    }
-    try {
-      const result = await redeemPoints(env, dnsUser, reservation.use.points, code.id, reservation.use.id)
-      const use = await stub.complete(reservation.use.id, result.log.id)
-      return ok({ user: result.user, log: result.log, use })
-    } catch (error) {
-      const committed = await env.USER_POINTS.getByName(dnsUser.uid).getOperation(`redemption:${reservation.use.id}`)
-      if (!committed) await stub.cancel(reservation.use.id)
-      throw error
-    }
+    return ok(await redeemCoordinatedCode(env, mailUser, { objectName: codeIndex.objectName, secretHash }))
   }
   throw new ResponseError('接口不存在', 404)
 }

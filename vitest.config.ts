@@ -17,6 +17,9 @@ export default defineConfig({
             if (token === 'banned-token') {
               return Response.json({ data: { userId: 'banned', email: 'banned@example.net', name: 'Banned' } })
             }
+            if (token === 'reader-token') {
+              return Response.json({ data: { userId: 'reader', email: 'reader@example.net', name: 'Reader' } })
+            }
             return Response.json({ data: { userId: 'admin', email: 'admin@ggu.edu.kg', name: 'Admin' } })
           }
           if (url.hostname === 'api.cloudflare.com') {

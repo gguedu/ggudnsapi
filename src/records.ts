@@ -301,8 +301,8 @@ export const toggleUserRecord = async (
   }
 }
 
-export const listUserRecordSummaries = async (env: Env, user: DnsUser) =>
-  (await listUserRecords(env, user.uid)).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(serializeRecord)
+export const listUserRecordSummaries = async (env: Env, uid: string) =>
+  (await listUserRecords(env, uid)).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(serializeRecord)
 
 export const listAllRecordSummaries = async (env: Env) =>
   (await listRecords(env)).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(serializeRecord)

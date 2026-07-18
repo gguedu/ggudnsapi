@@ -49,8 +49,6 @@ const json = (body: unknown, status = 200) =>
   Response.json(body, { status, headers: { 'content-type': 'application/json; charset=utf-8' } })
 
 export class DomainCoordinator extends DurableObject<Env> {
-  private tail: Promise<void> = Promise.resolve()
-
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
     ctx.blockConcurrencyWhile(async () => {
@@ -82,7 +80,7 @@ export class DomainCoordinator extends DurableObject<Env> {
       return json({ success: false, message: '请求体格式不正确', status: 400 }, 400)
     }
 
-    return this.enqueue(async () => {
+    return this.ctx.blockConcurrencyWhile(async () => {
       try {
         await this.ensureInitialized(input.root)
         const data = await this.dispatch(input)
@@ -94,15 +92,6 @@ export class DomainCoordinator extends DurableObject<Env> {
         return json({ success: false, message, status, data }, status)
       }
     })
-  }
-
-  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(operation, operation)
-    this.tail = result.then(
-      () => undefined,
-      () => undefined
-    )
-    return result
   }
 
   private getMeta(): StoredMeta | null {

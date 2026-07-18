@@ -161,8 +161,8 @@ export default function App() {
       transition={{ duration: 0.2 }}
     >
       <Layout
-        email={authed.user.email}
-        uid={authed.user.uid}
+        email={authed.mailUser.email}
+        uid={authed.mailUser.uid}
         currentTab={currentTab}
         onTabChange={(tab) => setCurrentTab(tab as Tab)}
         onRefresh={loadAll}

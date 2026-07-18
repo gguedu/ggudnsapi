@@ -129,9 +129,16 @@ export interface DnsRecord {
 }
 
 // ---- 鉴权 ----
+export interface AuthMailUser {
+  uid: string
+  email: string
+  name?: string
+  [key: string]: unknown
+}
+
 export interface AuthMe {
-  mailUser: Record<string, unknown>
-  user: DnsUser
+  mailUser: AuthMailUser
+  user: DnsUser | null
   isAdmin: boolean
 }
 

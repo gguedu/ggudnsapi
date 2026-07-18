@@ -1,6 +1,7 @@
 import type { DnsUser, Env, MailUserInfo } from './types'
 import { ResponseError } from './http'
 import { ensureCoordinatedUser } from './user-coordinator-client'
+import { requireDnsUserSnapshot } from './user-state'
 
 interface MailEnvelope<T> {
   code?: number
@@ -65,9 +66,14 @@ export const getCurrentMailUser = async (request: Request, env: Env): Promise<Ma
 export const ensureDnsUser = (env: Env, mailUser: MailUserInfo, enforceBan = true): Promise<DnsUser> =>
   ensureCoordinatedUser(env, mailUser, enforceBan)
 
-export const requireUser = async (request: Request, env: Env) => {
+export const requireUserIdentity = async (request: Request, env: Env) => {
   const mailUser = await getCurrentMailUser(request, env)
-  const dnsUser = await ensureDnsUser(env, mailUser)
+  return { mailUser }
+}
+
+export const requireUserRead = async (request: Request, env: Env) => {
+  const mailUser = await getCurrentMailUser(request, env)
+  const dnsUser = await requireDnsUserSnapshot(env, mailUser.uid)
   return { mailUser, dnsUser }
 }
 
@@ -80,8 +86,5 @@ export const requireAdmin = async (request: Request, env: Env) => {
   if (!admins.includes(mailUser.email.toLowerCase())) {
     throw new ResponseError('无管理员权限', 403)
   }
-  // DNS service bans deliberately do not revoke administration access.
-  // Keep all durable mirrors synchronized while bypassing only the feature gate.
-  const dnsUser = await ensureDnsUser(env, mailUser, false)
-  return { mailUser, dnsUser }
+  return { mailUser }
 }

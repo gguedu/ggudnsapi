@@ -1,4 +1,4 @@
-import type { BanEvent, DnsRecord, DnsUser, Env, MailUserInfo, Settings } from './types'
+import type { BanEvent, DnsRecord, DnsUser, Env, MailUserInfo, PointLog, RedemptionUse, Settings } from './types'
 import { ResponseError, getClientIp } from './http'
 
 export type UserCoordinatorAction =
@@ -6,6 +6,7 @@ export type UserCoordinatorAction =
   | 'create-user'
   | 'adjust-points'
   | 'set-ban'
+  | 'redeem-code'
   | 'delete-user'
   | 'create-record'
   | 'update-record'
@@ -70,20 +71,32 @@ export const setCoordinatedBan = (
   }
 ) => requestUserCoordinator<{ user: DnsUser; event: BanEvent }>(env, uid, 'set-ban', input)
 
+export const redeemCoordinatedCode = (
+  env: Env,
+  mailUser: MailUserInfo,
+  payload: { objectName: string; secretHash: string }
+) => requestUserCoordinator<{ user: DnsUser; log: PointLog; use: RedemptionUse }>(
+  env,
+  mailUser.uid,
+  'redeem-code',
+  { ...payload, mailUser: { uid: mailUser.uid, email: mailUser.email, name: mailUser.name } }
+)
+
 export const deleteCoordinatedUser = (env: Env, uid: string) =>
   requestUserCoordinator<{ uid: string }>(env, uid, 'delete-user', null)
 
 export const createUserCoordinatedRecord = (
   env: Env,
-  uid: string,
+  mailUser: MailUserInfo,
   root: string,
   request: Request,
   settings: Settings,
   body: Record<string, unknown>
 ) =>
-  requestUserCoordinator<{ record: DnsRecord; user: DnsUser }>(env, uid, 'create-record', {
+  requestUserCoordinator<{ record: DnsRecord; user: DnsUser }>(env, mailUser.uid, 'create-record', {
     root,
     settings,
+    mailUser: { uid: mailUser.uid, email: mailUser.email, name: mailUser.name },
     body,
     clientIp: getClientIp(request)
   })
